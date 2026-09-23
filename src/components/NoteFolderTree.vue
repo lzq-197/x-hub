@@ -723,9 +723,8 @@ defineExpose({ flatFolderOptions })
 
 <style scoped>
 .nl-tree {
-  flex: 0 0 auto;
-  max-height: 42%;
-  min-height: 88px;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-soft);
@@ -960,5 +959,12 @@ defineExpose({ flatFolderOptions })
 .nl-move-btn--primary:hover {
   color: var(--text-on-accent);
   filter: brightness(1.06);
+}
+
+/* 拖拽期间全局禁选 + 抓手光标（body 在组件外，用 :global 逃出 scoped） */
+:global(body.note-folder-dragging) {
+  cursor: grabbing;
+  user-select: none;
+  -webkit-user-select: none;
 }
 </style>

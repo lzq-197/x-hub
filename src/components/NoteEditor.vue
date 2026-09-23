@@ -66,7 +66,7 @@ const localContent = ref('')
 const dirty = ref(false)
 const previewHtml = computed(() => renderNoteMarkdown(localContent.value))
 
-/** 从 folders 树拼出「父 / 子」路径；未分类笔记不展示 */
+/** 从 folders 树拼出「父 / 子」路径；顶级笔记（folder_id 为空）不展示路径 */
 const noteFolderPath = computed(() => {
   const fid = props.note?.folder_id
   if (fid == null) return ''

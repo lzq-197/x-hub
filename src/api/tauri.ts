@@ -26,7 +26,7 @@ export interface Note {
   id: number
   title: string
   content: string
-  /** 所属文件夹；未分类为 null */
+  /** 所属文件夹；顶级为 null */
   folder_id?: number | null
   /** Markdown 导入去重键（相对路径）；手写笔记为 null */
   source_path?: string | null

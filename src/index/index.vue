@@ -558,7 +558,7 @@ async function onDeleteNote(id: number) {
         try {
           n = await store.addNote(snapshot.title, snapshot.folder_id)
         } catch {
-          // 原文件夹已删除时退回未分类
+          // 原文件夹已删除时退回顶级
           n = await store.addNote(snapshot.title, null)
         }
         await store.saveNote(n.id, snapshot.title, snapshot.content)
