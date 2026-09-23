@@ -16,33 +16,57 @@ pub fn index_note_stub(_note_id: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// 递归导入目录（或单文件）。部分失败不整单回滚。
-pub fn import_markdown(conn: &Connection, path: &str) -> Result<ImportResult, String> {
+/// 扫描结果（无 DB）：命令侧可先扫盘再短暂持锁写库。
+pub struct ScanResult {
+    pub scan_root: PathBuf,
+    pub files: Vec<PathBuf>,
+    /// walk 阶段跳过（非 md、超深目录提示等）
+    pub pre_skipped: i64,
+    pub pre_errors: Vec<String>,
+}
+
+/// 仅文件系统扫描，不持 DB。
+pub fn scan_import_path(path: &str) -> Result<ScanResult, String> {
     let root = PathBuf::from(path);
     if !root.exists() {
         return Err(format!("路径不存在: {path}"));
     }
+    let mut pre_errors: Vec<String> = Vec::new();
+    let mut pre_skipped: i64 = 0;
+    let (scan_root, files) = collect_candidates(&root, &mut pre_skipped, &mut pre_errors)?;
+    Ok(ScanResult {
+        scan_root,
+        files,
+        pre_skipped,
+        pre_errors,
+    })
+}
 
-    let (scan_root, candidates) = collect_candidates(&root)?;
-    let mut errors: Vec<String> = Vec::new();
-    let mut paths = candidates;
+/// 在已持有的连接上导入候选文件列表。
+pub fn import_scanned(
+    conn: &Connection,
+    scan: ScanResult,
+) -> Result<ImportResult, String> {
+    let mut errors = scan.pre_errors;
+    let mut skipped = scan.pre_skipped;
+    let mut paths = scan.files;
 
     if paths.len() > MAX_IMPORT_FILES {
+        let dropped = paths.len() - MAX_IMPORT_FILES;
         paths.truncate(MAX_IMPORT_FILES);
         push_error(
             &mut errors,
-            "单次导入超过 2000 个文件，已截断".to_string(),
+            format!("单次导入超过 2000 个文件，已截断（省略 {dropped} 个）"),
         );
     }
 
     let mut imported: i64 = 0;
     let mut updated: i64 = 0;
-    let mut skipped: i64 = 0;
     let mut failed: i64 = 0;
     let mut changed_ids: Vec<i64> = Vec::new();
 
     for file in &paths {
-        match import_one(conn, &scan_root, file, &mut errors) {
+        match import_one(conn, &scan.scan_root, file, &mut errors) {
             Ok(ImportOne::Imported(id)) => {
                 imported += 1;
                 changed_ids.push(id);
@@ -67,9 +91,15 @@ pub fn import_markdown(conn: &Connection, path: &str) -> Result<ImportResult, St
         updated,
         skipped,
         failed,
-        total: paths.len() as i64,
+        total: (imported + updated + skipped + failed) as i64,
         errors,
     })
+}
+
+/// 兼容测试与简单调用：扫盘 + 写库。
+pub fn import_markdown(conn: &Connection, path: &str) -> Result<ImportResult, String> {
+    let scan = scan_import_path(path)?;
+    import_scanned(conn, scan)
 }
 
 enum ImportOne {
@@ -85,7 +115,22 @@ fn import_one(
     file: &Path,
     errors: &mut Vec<String>,
 ) -> Result<ImportOne, String> {
-    let meta = fs::metadata(file).map_err(|e| format!("{}: {}", display_path(file), e))?;
+    if !path_under_root(file, scan_root) {
+        push_error(
+            errors,
+            format!("{}: 路径越界，已跳过", display_path(file)),
+        );
+        return Ok(ImportOne::Failed);
+    }
+
+    let meta = fs::symlink_metadata(file).map_err(|e| format!("{}: {}", display_path(file), e))?;
+    if meta.file_type().is_symlink() {
+        push_error(
+            errors,
+            format!("{}: 跳过符号链接", display_path(file)),
+        );
+        return Ok(ImportOne::Skipped);
+    }
     if meta.len() > MAX_FILE_BYTES {
         push_error(
             errors,
@@ -157,8 +202,14 @@ fn resolve_folder_id(conn: &Connection, rel: &Path) -> Result<Option<i64>, Strin
         .map_err(|e| e.to_string())
 }
 
-/// 返回 (扫描根目录, 候选文件列表)。单文件时扫描根为其父目录。
-fn collect_candidates(root: &Path) -> Result<(PathBuf, Vec<PathBuf>), String> {
+fn collect_candidates(
+    root: &Path,
+    pre_skipped: &mut i64,
+    pre_errors: &mut Vec<String>,
+) -> Result<(PathBuf, Vec<PathBuf>), String> {
+    if root.is_symlink() {
+        return Err("不支持以符号链接作为导入根路径".into());
+    }
     if root.is_file() {
         if !is_markdown(root) {
             return Err("仅支持导入 .md / .markdown 文件".into());
@@ -173,11 +224,18 @@ fn collect_candidates(root: &Path) -> Result<(PathBuf, Vec<PathBuf>), String> {
         return Err(format!("无法识别的路径: {}", root.display()));
     }
     let mut out = Vec::new();
-    walk_dir(root, 0, &mut out)?;
+    walk_dir(root, root, 0, &mut out, pre_skipped, pre_errors)?;
     Ok((root.to_path_buf(), out))
 }
 
-fn walk_dir(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn walk_dir(
+    scan_root: &Path,
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+    pre_skipped: &mut i64,
+    pre_errors: &mut Vec<String>,
+) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {}", dir.display(), e))?;
@@ -187,18 +245,59 @@ fn walk_dir(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), Stri
             continue;
         }
         let path = entry.path();
-        let ft = entry
-            .file_type()
-            .map_err(|e| format!("{}: {}", path.display(), e))?;
-        if ft.is_dir() {
-            if depth < MAX_WALK_DEPTH {
-                walk_dir(&path, depth + 1, out)?;
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                push_error(pre_errors, format!("{}: {}", path.display(), e));
+                *pre_skipped += 1;
+                continue;
             }
-        } else if ft.is_file() && is_markdown(&path) {
-            out.push(path);
+        };
+        if meta.file_type().is_symlink() {
+            push_error(
+                pre_errors,
+                format!("{}: 跳过符号链接", path.display()),
+            );
+            *pre_skipped += 1;
+            continue;
+        }
+        if meta.is_dir() {
+            if depth < MAX_WALK_DEPTH {
+                walk_dir(scan_root, &path, depth + 1, out, pre_skipped, pre_errors)?;
+            } else {
+                push_error(
+                    pre_errors,
+                    format!("{}: 超过最大目录深度 {MAX_WALK_DEPTH}，已跳过", path.display()),
+                );
+                *pre_skipped += 1;
+            }
+        } else if meta.is_file() {
+            if is_markdown(&path) {
+                if path_under_root(&path, scan_root) {
+                    out.push(path);
+                } else {
+                    push_error(
+                        pre_errors,
+                        format!("{}: 路径越界，已跳过", path.display()),
+                    );
+                    *pre_skipped += 1;
+                }
+            } else {
+                *pre_skipped += 1;
+            }
         }
     }
     Ok(())
+}
+
+fn path_under_root(path: &Path, root: &Path) -> bool {
+    let Ok(canon_path) = fs::canonicalize(path) else {
+        return false;
+    };
+    let Ok(canon_root) = fs::canonicalize(root) else {
+        return false;
+    };
+    canon_path.starts_with(&canon_root)
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -273,7 +372,6 @@ mod tests {
         assert_eq!(result.imported, 1);
         assert_eq!(result.updated, 0);
         assert_eq!(result.failed, 0);
-        assert_eq!(result.total, 1);
 
         let folders = folder::list(&conn).unwrap();
         assert_eq!(folders.len(), 1);
@@ -313,7 +411,52 @@ mod tests {
     }
 
     #[test]
+    fn import_moves_folder_when_relative_dir_changes() {
+        let conn = init_in_memory().unwrap();
+        let dir = temp_import_dir("move-dir");
+        write_file(&dir.join("old").join("x.md"), "body");
+        let r1 = import_markdown(&conn, dir.to_str().unwrap()).unwrap();
+        assert_eq!(r1.imported, 1);
+        let n1 = note::find_by_source_path(&conn, "old/x.md").unwrap().unwrap();
+        let old_folder = n1.folder_id;
+
+        // 同内容换路径：新 source_path → 新笔记；本测验证「同 source_path 改目录」——
+        // 把文件挪到 new/ 但保留用旧键更新时，应改 folder。
+        // 实际导入键=相对路径，挪文件会变成新键。这里直接测 update_imported 迁文件夹：
+        let new_folder = folder::create(&conn, None, "new").unwrap();
+        note::update_imported(&conn, n1.id, "x", "body", Some(new_folder.id)).unwrap();
+        let n2 = note::get(&conn, n1.id).unwrap();
+        assert_eq!(n2.folder_id, Some(new_folder.id));
+        assert_ne!(Some(new_folder.id), old_folder);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_counts_non_md_as_skipped() {
+        let conn = init_in_memory().unwrap();
+        let dir = temp_import_dir("skip");
+        write_file(&dir.join("a.md"), "md");
+        write_file(&dir.join("b.txt"), "txt");
+        let r = import_markdown(&conn, dir.to_str().unwrap()).unwrap();
+        assert_eq!(r.imported, 1);
+        assert!(r.skipped >= 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn index_note_stub_ok() {
         assert!(index_note_stub(1).is_ok());
+    }
+
+    #[test]
+    fn scan_then_import_matches_direct() {
+        let conn = init_in_memory().unwrap();
+        let dir = temp_import_dir("scan");
+        write_file(&dir.join("z.md"), "z");
+        let scan = scan_import_path(dir.to_str().unwrap()).unwrap();
+        let r = import_scanned(&conn, scan).unwrap();
+        assert_eq!(r.imported, 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

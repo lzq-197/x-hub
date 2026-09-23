@@ -28,7 +28,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'select', id: number): void
-  (e: 'create'): void
+  /** folderId：当前树选中的真实文件夹；未分类/全部则为 null */
+  (e: 'create', folderId: number | null): void
   (e: 'delete', id: number): void
   (e: 'import-request'): void
 }>()
@@ -55,7 +56,11 @@ onMounted(async () => {
 const folderFilter = ref<FolderFilter>('all')
 /** 默认全部展开 */
 const expanded = ref<Set<number>>(new Set())
-const dropTarget = ref<FolderFilter | null>(null)
+
+function emitCreate() {
+  const folderId = typeof folderFilter.value === 'number' ? folderFilter.value : null
+  emit('create', folderId)
+}
 
 watch(
   () => store.state.folders.map((f) => f.id).join(','),
@@ -156,26 +161,25 @@ function toggleExpand(id: number, e: Event) {
   expanded.value = next
 }
 
-/** 打开笔记时同步文件夹筛选并展开父链（列表选中 / 全局搜索跳转） */
+/** 打开笔记时展开父链；仅在非「全部笔记」时才改筛选（避免从「全部」点开被拽走） */
 watch(
   () => props.activeId,
   (id) => {
     if (id == null) return
     const note = props.notes.find((n) => n.id === id)
     if (!note) return
-    if (note.folder_id == null) {
-      folderFilter.value = 'uncategorized'
-      return
+    if (note.folder_id != null) {
+      const next = new Set(expanded.value)
+      let cur: number | null = note.folder_id
+      const byId = new Map(store.state.folders.map((f) => [f.id, f]))
+      while (cur != null) {
+        next.add(cur)
+        cur = byId.get(cur)?.parent_id ?? null
+      }
+      expanded.value = next
     }
-    folderFilter.value = note.folder_id
-    const next = new Set(expanded.value)
-    let cur: number | null = note.folder_id
-    const byId = new Map(store.state.folders.map((f) => [f.id, f]))
-    while (cur != null) {
-      next.add(cur)
-      cur = byId.get(cur)?.parent_id ?? null
-    }
-    expanded.value = next
+    if (folderFilter.value === 'all') return
+    folderFilter.value = note.folder_id == null ? 'uncategorized' : note.folder_id
   },
   { immediate: true },
 )
@@ -456,43 +460,6 @@ async function confirmMoveFolder() {
   }
 }
 
-// ---- 拖拽笔记到文件夹 ----
-function onNoteDragStart(e: DragEvent, noteId: number) {
-  e.dataTransfer?.setData('application/x-xhub-note-id', String(noteId))
-  e.dataTransfer?.setData('text/plain', String(noteId))
-  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
-}
-
-function onFolderDragOver(e: DragEvent, target: FolderFilter) {
-  if (!e.dataTransfer?.types.includes('application/x-xhub-note-id') &&
-      !e.dataTransfer?.types.includes('text/plain')) {
-    return
-  }
-  e.preventDefault()
-  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
-  dropTarget.value = target
-}
-
-function onFolderDragLeave(target: FolderFilter) {
-  if (dropTarget.value === target) dropTarget.value = null
-}
-
-async function onFolderDrop(e: DragEvent, target: FolderFilter) {
-  e.preventDefault()
-  dropTarget.value = null
-  if (target === 'all') return
-  const raw =
-    e.dataTransfer?.getData('application/x-xhub-note-id') ||
-    e.dataTransfer?.getData('text/plain')
-  const noteId = Number(raw)
-  if (!Number.isFinite(noteId) || noteId <= 0) return
-  const folderId = target === 'uncategorized' ? null : target
-  try {
-    await store.setNoteFolder(noteId, folderId)
-  } catch (err) {
-    showToast(String(err))
-  }
-}
 </script>
 
 <template>
@@ -503,7 +470,7 @@ async function onFolderDrop(e: DragEvent, target: FolderFilter) {
         <button class="icon-btn" type="button" title="导入 Markdown" @click="emit('import-request')">
           <Import :size="15" :stroke-width="2" />
         </button>
-        <button class="icon-btn add" type="button" title="新建笔记" @click="emit('create')">
+        <button class="icon-btn add" type="button" title="新建笔记" @click="emitCreate">
           <Plus :size="15" :stroke-width="2.2" />
         </button>
       </div>
@@ -548,19 +515,13 @@ async function onFolderDrop(e: DragEvent, target: FolderFilter) {
             v-for="(row, idx) in treeRows"
             :key="`${row.kind}-${row.id ?? 'x'}-${idx}`"
             class="tree-row"
-            :class="{
-              active: isSelected(row),
-              drop: dropTarget === filterKey(row) && row.kind !== 'all',
-            }"
+            :class="{ active: isSelected(row) }"
             :style="{ paddingLeft: `${8 + row.depth * 12}px` }"
             role="button"
             tabindex="0"
             @click="selectFolder(row)"
             @keydown.enter="selectFolder(row)"
             @contextmenu="onTreeContext($event, row)"
-            @dragover="onFolderDragOver($event, filterKey(row))"
-            @dragleave="onFolderDragLeave(filterKey(row))"
-            @drop="onFolderDrop($event, filterKey(row))"
           >
             <button
               v-if="row.kind === 'folder' && row.hasChildren"
@@ -607,12 +568,10 @@ async function onFolderDrop(e: DragEvent, target: FolderFilter) {
             :class="{ active: n.id === activeId }"
             role="button"
             tabindex="0"
-            draggable="true"
             @click="emit('select', n.id)"
             @keydown.enter="emit('select', n.id)"
             @keydown.space.prevent="emit('select', n.id)"
             @contextmenu="onNoteContext($event, n)"
-            @dragstart="onNoteDragStart($event, n.id)"
           >
             <div class="note-item-main">
               <span class="note-title" :title="n.title">{{ n.title }}</span>
@@ -634,7 +593,7 @@ async function onFolderDrop(e: DragEvent, target: FolderFilter) {
         <div v-else class="empty-state">
           <StickyNote :size="24" :stroke-width="1.7" aria-hidden="true" />
           <p>{{ folderFilter === 'all' ? '还没有笔记' : '此文件夹暂无笔记' }}</p>
-          <button class="pill-btn" type="button" style="margin-top: 6px" @click="emit('create')">
+          <button class="pill-btn" type="button" style="margin-top: 6px" @click="emitCreate">
             新建笔记
           </button>
         </div>
@@ -798,10 +757,6 @@ async function onFolderDrop(e: DragEvent, target: FolderFilter) {
   background: var(--brand-50);
   color: var(--brand-500);
   font-weight: 600;
-}
-.tree-row.drop {
-  outline: 1px dashed var(--brand-500);
-  background: color-mix(in srgb, var(--brand-50) 80%, transparent);
 }
 .tree-chevron,
 .tree-chevron-spacer {

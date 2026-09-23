@@ -24,6 +24,11 @@ pub fn create(conn: &Connection, parent_id: Option<i64>, name: &str) -> Result<N
             )));
         }
     }
+    if find_child_by_name(conn, parent_id, name)?.is_some() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "INVALID_ARGUMENT: 同级已存在同名文件夹".into(),
+        ));
+    }
 
     let ts = now();
     conn.execute(
@@ -39,6 +44,18 @@ pub fn rename(conn: &Connection, id: i64, name: &str) -> Result<NoteFolder> {
         return Err(rusqlite::Error::InvalidParameterName(
             "INVALID_ARGUMENT: 文件夹名称不能为空".into(),
         ));
+    }
+    let current = conn.query_row(
+        "SELECT id, parent_id, name, sort_order, created_at, updated_at FROM note_folders WHERE id = ?1",
+        params![id],
+        row_to_folder_base,
+    )?;
+    if let Some(existing) = find_child_by_name(conn, current.parent_id, name)? {
+        if existing != id {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "INVALID_ARGUMENT: 同级已存在同名文件夹".into(),
+            ));
+        }
     }
     let affected = conn.execute(
         "UPDATE note_folders SET name = ?1, updated_at = ?2 WHERE id = ?3",
@@ -262,14 +279,6 @@ fn attach_counts(conn: &Connection, folders: &mut [NoteFolder]) -> Result<()> {
         return Ok(());
     }
 
-    let mut children: HashMap<Option<i64>, Vec<i64>> = HashMap::new();
-    for folder in folders.iter() {
-        children
-            .entry(folder.parent_id)
-            .or_default()
-            .push(folder.id);
-    }
-
     let mut direct_counts: HashMap<i64, i64> = HashMap::new();
     let mut stmt = conn.prepare("SELECT folder_id, COUNT(*) FROM notes WHERE folder_id IS NOT NULL GROUP BY folder_id")?;
     let rows = stmt.query_map([], |row| {
@@ -344,5 +353,13 @@ mod tests {
         let err = move_folder(&conn, a.id, Some(b.id)).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("环") || msg.contains("子孙") || msg.contains("INVALID"));
+    }
+
+    #[test]
+    fn create_rejects_sibling_duplicate_name() {
+        let conn = init_in_memory().unwrap();
+        create(&conn, None, "工作").unwrap();
+        let err = create(&conn, None, "工作").unwrap_err();
+        assert!(err.to_string().contains("同名"));
     }
 }

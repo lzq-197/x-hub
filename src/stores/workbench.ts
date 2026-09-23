@@ -406,6 +406,11 @@ export function useStore() {
 
   async function deleteFolder(id: number) {
     if (!isTauri()) {
+      const victim = state.folders.find((f) => f.id === id)
+      const parentId = victim?.parent_id ?? null
+      for (const f of state.folders) {
+        if (f.parent_id === id) f.parent_id = parentId
+      }
       state.folders = state.folders.filter((f) => f.id !== id)
       for (const n of state.notes) {
         if (n.folder_id === id) n.folder_id = null

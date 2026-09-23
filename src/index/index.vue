@@ -518,8 +518,15 @@ const activeNote = computed(
   () => store.state.notes.find((n) => n.id === activeNoteId.value) ?? null,
 )
 
-async function onCreateNote() {
+async function onCreateNote(folderId: number | null = null) {
   const n = await store.addNote('无标题笔记')
+  if (folderId != null) {
+    try {
+      await store.setNoteFolder(n.id, folderId)
+    } catch (err) {
+      showToast(String(err))
+    }
+  }
   activeNoteId.value = n.id
   // 悬浮球等入口触发时可能停在其它视图：新建后必须切到速记页，否则只见新建不见页面
   activeView.value = 'notes'

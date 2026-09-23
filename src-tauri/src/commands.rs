@@ -361,13 +361,16 @@ pub fn import_markdown(
     state: State<'_, DbState>,
     path: String,
 ) -> Result<ImportResult, String> {
+    // 先扫盘（不持锁），再短锁写库，避免大目录卡住其它命令
+    let scan = crate::knowledge::scan_import_path(&path)?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let result = crate::knowledge::import_markdown(&conn, &path)?;
+    let result = crate::knowledge::import_scanned(&conn, scan)?;
     log::info!(
-        "Markdown 导入: path={} imported={} updated={} failed={} total={}",
+        "Markdown 导入: path={} imported={} updated={} skipped={} failed={} total={}",
         path,
         result.imported,
         result.updated,
+        result.skipped,
         result.failed,
         result.total
     );
@@ -3220,7 +3223,15 @@ pub async fn locate_weather_by_ip() -> Result<crate::online::GeoLocation, String
 // ---------- 工具 ----------
 
 fn err_str(e: rusqlite::Error) -> String {
-    format!("数据库错误: {}", e)
+    match e {
+        rusqlite::Error::InvalidParameterName(msg) => {
+            msg.strip_prefix("INVALID_ARGUMENT: ")
+                .or_else(|| msg.strip_prefix("NOT_FOUND: "))
+                .unwrap_or(&msg)
+                .to_string()
+        }
+        other => format!("数据库错误: {}", other),
+    }
 }
 
 fn parse_kind(kind: &str) -> Result<ResourceKind, String> {

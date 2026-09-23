@@ -500,6 +500,16 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE notes ADD COLUMN source_path TEXT", [])?;
     }
 
+    // 导入键唯一（NULL 可多条）；同级文件夹名唯一（根级 parent_id 用 -1 哨兵）
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_source_path ON notes(source_path) WHERE source_path IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_note_folders_sibling ON note_folders(IFNULL(parent_id, -1), name)",
+        [],
+    )?;
+
     Ok(())
 }
 
