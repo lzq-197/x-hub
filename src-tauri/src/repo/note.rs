@@ -13,7 +13,7 @@ pub fn create(conn: &Connection, title: &str) -> Result<Note> {
 
 pub fn get(conn: &Connection, id: i64) -> Result<Note> {
     conn.query_row(
-        "SELECT id, title, content, created_at, updated_at FROM notes WHERE id = ?1",
+        "SELECT id, title, content, folder_id, source_path, created_at, updated_at FROM notes WHERE id = ?1",
         params![id],
         row_to_note,
     )
@@ -21,7 +21,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Note> {
 
 pub fn list(conn: &Connection) -> Result<Vec<Note>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, created_at, updated_at FROM notes ORDER BY updated_at DESC, id DESC",
+        "SELECT id, title, content, folder_id, source_path, created_at, updated_at FROM notes ORDER BY updated_at DESC, id DESC",
     )?;
     let rows = stmt.query_map([], row_to_note)?;
     rows.collect()
@@ -31,7 +31,7 @@ pub fn list(conn: &Connection) -> Result<Vec<Note>> {
 /// 避免每次刷新都全量读取正文，数据量大时省内存省 IO。
 pub fn list_meta(conn: &Connection) -> Result<Vec<Note>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, '', created_at, updated_at FROM notes ORDER BY updated_at DESC, id DESC",
+        "SELECT id, title, '', folder_id, source_path, created_at, updated_at FROM notes ORDER BY updated_at DESC, id DESC",
     )?;
     let rows = stmt.query_map([], row_to_note)?;
     rows.collect()
@@ -59,7 +59,7 @@ pub fn delete(conn: &Connection, id: i64) -> Result<()> {
 pub fn search(conn: &Connection, keyword: &str) -> Result<Vec<Note>> {
     let pattern = format!("%{}%", keyword);
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, created_at, updated_at FROM notes WHERE title LIKE ?1 OR content LIKE ?1 ORDER BY updated_at DESC",
+        "SELECT id, title, content, folder_id, source_path, created_at, updated_at FROM notes WHERE title LIKE ?1 OR content LIKE ?1 ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map(params![pattern], row_to_note)?;
     rows.collect()
@@ -70,8 +70,10 @@ pub fn row_to_note(row: &rusqlite::Row) -> Result<Note> {
         id: row.get(0)?,
         title: row.get(1)?,
         content: row.get(2)?,
-        created_at: row.get(3)?,
-        updated_at: row.get(4)?,
+        folder_id: row.get(3)?,
+        source_path: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -86,6 +88,8 @@ mod tests {
         let n = create(&conn, "待办事项").unwrap();
         assert_eq!(n.title, "待办事项");
         assert_eq!(n.content, "");
+        assert_eq!(n.folder_id, None);
+        assert_eq!(n.source_path, None);
     }
 
     #[test]

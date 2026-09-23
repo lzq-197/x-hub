@@ -472,6 +472,34 @@ fn migrate(conn: &Connection) -> Result<()> {
     // 多维护一棵 B 树。老库在这里顺手删掉。
     conn.execute("DROP INDEX IF EXISTS idx_todos_repeat", [])?;
 
+    // 速记文件夹（知识库结构段）：note_folders 表 + notes.folder_id / source_path
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS note_folders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          parent_id INTEGER REFERENCES note_folders(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+        );
+        "#,
+    )?;
+
+    let note_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(notes)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !note_cols.iter().any(|c| c == "folder_id") {
+        conn.execute(
+            "ALTER TABLE notes ADD COLUMN folder_id INTEGER REFERENCES note_folders(id) ON DELETE SET NULL",
+            [],
+        )?;
+    }
+    if !note_cols.iter().any(|c| c == "source_path") {
+        conn.execute("ALTER TABLE notes ADD COLUMN source_path TEXT", [])?;
+    }
+
     Ok(())
 }
 
@@ -727,6 +755,51 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM todos WHERE id IN (?1, ?2)", params![parent.id, child.id], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn note_folders_schema_and_notes_columns() {
+        let conn = init_in_memory().unwrap();
+        assert!(table_exists(&conn, "note_folders"));
+
+        let note_cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(notes)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap();
+        for col in ["folder_id", "source_path"] {
+            assert!(note_cols.iter().any(|c| c == col), "notes 缺列 {col}");
+        }
+
+        // 幂等：连跑两次不报错
+        migrate(&conn).unwrap();
+    }
+
+    #[test]
+    fn legacy_notes_without_folder_columns_migrates() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE notes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              title TEXT NOT NULL DEFAULT '',
+              content TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+              updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+            );
+            INSERT INTO notes (title, content) VALUES ('存量笔记', '正文');
+            ",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let note = crate::repo::note::get(&conn, 1).unwrap();
+        assert_eq!(note.title, "存量笔记");
+        assert_eq!(note.folder_id, None);
+        assert_eq!(note.source_path, None);
     }
 
     #[test]

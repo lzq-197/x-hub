@@ -28,8 +28,36 @@ pub struct Note {
     pub id: i64,
     pub title: String,
     pub content: String,
+    #[serde(default)]
+    pub folder_id: Option<i64>,
+    #[serde(default)]
+    pub source_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteFolder {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub sort_order: i64,
+    #[serde(default)]
+    pub notes_count: i64,
+    #[serde(default)]
+    pub subtree_notes: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportResult {
+    pub imported: i64,
+    pub updated: i64,
+    pub skipped: i64,
+    pub failed: i64,
+    pub total: i64,
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
