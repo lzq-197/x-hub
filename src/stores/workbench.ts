@@ -374,13 +374,17 @@ export function useStore() {
     state.folders = await tauriApi.listNoteFolders().catch(() => [] as NoteFolder[])
   }
 
-  async function createFolder(parentId: number | null, name: string) {
+  async function createFolder(
+    parentId: number | null,
+    name: string,
+    sortOrder?: number | null,
+  ) {
     if (!isTauri()) {
       const folder: NoteFolder = {
         id: Date.now(),
         parent_id: parentId,
         name,
-        sort_order: state.folders.length,
+        sort_order: sortOrder ?? state.folders.length,
         notes_count: 0,
         subtree_notes: 0,
         created_at: new Date().toISOString(),
@@ -389,9 +393,30 @@ export function useStore() {
       state.folders.push(folder)
       return folder
     }
-    const folder = await tauriApi.createNoteFolder(parentId, name)
+    const folder = await tauriApi.createNoteFolder(parentId, name, sortOrder)
     await refreshFolders()
     return folder
+  }
+
+  async function reorderFolders(ids: number[]) {
+    if (!isTauri()) {
+      ids.forEach((id, i) => {
+        const f = state.folders.find((x) => x.id === id)
+        if (f) f.sort_order = i + 1
+      })
+      return
+    }
+    await tauriApi.reorderNoteFolders(ids)
+    await refreshFolders()
+  }
+
+  async function resolveOrCreateRootFolder(name: string): Promise<number> {
+    const trimmed = name.trim()
+    if (!trimmed) throw new Error('文件夹名称不能为空')
+    const existing = state.folders.find((f) => f.parent_id == null && f.name === trimmed)
+    if (existing) return existing.id
+    const folder = await createFolder(null, trimmed)
+    return folder.id
   }
 
   async function renameFolder(id: number, name: string) {
@@ -1426,6 +1451,8 @@ export function useStore() {
     refreshNotes,
     refreshFolders,
     createFolder,
+    reorderFolders,
+    resolveOrCreateRootFolder,
     renameFolder,
     deleteFolder,
     moveFolder,

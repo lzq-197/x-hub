@@ -894,8 +894,13 @@ export const tauriApi = {
     invoke<Note>('set_note_source_path', { noteId, sourcePath }),
   listNotes: () => invoke<Note[]>('list_notes'),
   listNoteFolders: () => invoke<NoteFolder[]>('list_note_folders'),
-  createNoteFolder: (parentId: number | null, name: string) =>
-    invoke<NoteFolder>('create_note_folder', { parentId, name }),
+  createNoteFolder: (parentId: number | null, name: string, sortOrder?: number | null) =>
+    invoke<NoteFolder>('create_note_folder', {
+      parentId,
+      name,
+      sortOrder: sortOrder ?? null,
+    }),
+  reorderNoteFolders: (ids: number[]) => invoke<void>('reorder_note_folders', { ids }),
   renameNoteFolder: (id: number, name: string) =>
     invoke<NoteFolder>('rename_note_folder', { id, name }),
   moveNoteFolder: (id: number, newParentId: number | null) =>
