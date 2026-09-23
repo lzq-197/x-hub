@@ -548,6 +548,12 @@ function onSaveNote(id: number, title: string, content: string) {
   store.saveNote(id, title, content)
 }
 
+/** Task 8 将挂 ImportDialog；此处先接好打开入口 */
+const importDialogVisible = ref(false)
+function onImportNotes() {
+  importDialogVisible.value = true
+}
+
 // ---- 全局搜索 / 设置 ----
 const searchVisible = ref(false)
 const promptManageVisible = ref(false)
@@ -834,6 +840,7 @@ provide('showToast', showToast)
               @select="onSelectNote"
               @create="onCreateNote"
               @delete="onDeleteNote"
+              @import-request="onImportNotes"
             />
             <NoteEditor
               :note="activeNote"
