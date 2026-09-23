@@ -51,6 +51,19 @@ pub fn update(conn: &Connection, id: i64, title: &str, content: &str) -> Result<
     get(conn, id)
 }
 
+pub fn set_folder(conn: &Connection, note_id: i64, folder_id: Option<i64>) -> Result<Note> {
+    let affected = conn.execute(
+        "UPDATE notes SET folder_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![folder_id, now(), note_id],
+    )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 笔记 {note_id} 不存在"
+        )));
+    }
+    get(conn, note_id)
+}
+
 pub fn delete(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
     Ok(())
