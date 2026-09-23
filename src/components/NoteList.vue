@@ -252,6 +252,95 @@ function onTreeContext(e: MouseEvent, row: TreeRow) {
   ])
 }
 
+/** 笔记右键：移文件夹（不依赖 HTML5 拖拽；Tauri dragDropEnabled 下 DnD 常失效） */
+function onNoteContext(e: MouseEvent, note: Note) {
+  e.preventDefault()
+  e.stopPropagation()
+  const items: ContextMenuItem[] = [
+    {
+      label: '移到未分类',
+      onClick: () => void moveNoteToFolder(note.id, null),
+    },
+    {
+      label: '移动到文件夹…',
+      dividerBefore: true,
+      onClick: () => openNoteMoveDialog(note),
+    },
+  ]
+  // ≤12 个文件夹时额外列出名称，一点即移；更多则走上方弹层
+  const flat = flatFolderOptions(note.folder_id ?? null)
+  if (flat.length > 0 && flat.length <= 12) {
+    for (let i = 0; i < flat.length; i++) {
+      const opt = flat[i]!
+      items.push({
+        label: opt.label,
+        dividerBefore: i === 0,
+        onClick: () => void moveNoteToFolder(note.id, Number(opt.value)),
+      })
+    }
+  }
+  openMenu(e, items)
+}
+
+function flatFolderOptions(excludeId: number | null): AppSelectOption[] {
+  const opts: AppSelectOption[] = []
+  const walk = (parentId: number | null, depth: number) => {
+    for (const c of childrenOf.value.get(parentId) ?? []) {
+      if (excludeId != null && c.id === excludeId) {
+        // 当前文件夹不可选，子级上提到本层继续可选
+        walk(c.id, depth)
+        continue
+      }
+      opts.push({
+        value: String(c.id),
+        label: `${'　'.repeat(depth)}${c.name}`,
+      })
+      walk(c.id, depth + 1)
+    }
+  }
+  walk(null, 0)
+  return opts
+}
+
+async function moveNoteToFolder(noteId: number, folderId: number | null) {
+  const note = props.notes.find((n) => n.id === noteId)
+  if (note && (note.folder_id ?? null) === folderId) return
+  try {
+    await store.setNoteFolder(noteId, folderId)
+  } catch (err) {
+    showToast(String(err))
+  }
+}
+
+// ---- 移动笔记到文件夹（弹层）----
+const noteMoveTarget = ref<Note | null>(null)
+const noteMoveFolderValue = ref('uncategorized')
+
+const noteMoveOptions = computed((): AppSelectOption[] => {
+  if (!noteMoveTarget.value) return []
+  return [
+    { value: 'uncategorized', label: '未分类' },
+    ...flatFolderOptions(null),
+  ]
+})
+
+function openNoteMoveDialog(note: Note) {
+  noteMoveTarget.value = note
+  noteMoveFolderValue.value =
+    note.folder_id == null ? 'uncategorized' : String(note.folder_id)
+}
+
+async function confirmNoteMove() {
+  const note = noteMoveTarget.value
+  if (!note) return
+  const folderId =
+    noteMoveFolderValue.value === 'uncategorized'
+      ? null
+      : Number(noteMoveFolderValue.value)
+  noteMoveTarget.value = null
+  await moveNoteToFolder(note.id, folderId)
+}
+
 async function promptCreateFolder(parentId: number | null) {
   const name = window.prompt(parentId == null ? '新建文件夹名称' : '新建子文件夹名称', '')
   if (name == null) return
@@ -522,6 +611,7 @@ async function onFolderDrop(e: DragEvent, target: FolderFilter) {
             @click="emit('select', n.id)"
             @keydown.enter="emit('select', n.id)"
             @keydown.space.prevent="emit('select', n.id)"
+            @contextmenu="onNoteContext($event, n)"
             @dragstart="onNoteDragStart($event, n.id)"
           >
             <div class="note-item-main">
@@ -582,6 +672,26 @@ async function onFolderDrop(e: DragEvent, target: FolderFilter) {
           <div class="nl-move-foot">
             <button type="button" class="nl-move-btn" @click="moveTarget = null">取消</button>
             <button type="button" class="nl-move-btn nl-move-btn--primary" @click="confirmMoveFolder">
+              移动
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="noteMoveTarget" class="modal-mask" @click.self="noteMoveTarget = null">
+        <div class="modal-card nl-move-card" role="dialog" aria-modal="true">
+          <h2 class="nl-move-title">移动笔记「{{ noteMoveTarget.title }}」</h2>
+          <p class="nl-move-hint">选择目标文件夹</p>
+          <AppSelect
+            v-model="noteMoveFolderValue"
+            :options="noteMoveOptions"
+            aria-label="目标文件夹"
+          />
+          <div class="nl-move-foot">
+            <button type="button" class="nl-move-btn" @click="noteMoveTarget = null">取消</button>
+            <button type="button" class="nl-move-btn nl-move-btn--primary" @click="confirmNoteMove">
               移动
             </button>
           </div>

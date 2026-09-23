@@ -135,21 +135,23 @@ pub fn move_folder(
 }
 
 pub fn delete_promote(conn: &Connection, id: i64) -> Result<(i64, i64)> {
-    let folder = conn.query_row(
+    let tx = conn.unchecked_transaction()?;
+    let folder = tx.query_row(
         "SELECT id, parent_id, name, sort_order, created_at, updated_at FROM note_folders WHERE id = ?1",
         params![id],
         row_to_folder_base,
     )?;
     let parent = folder.parent_id;
-    let promoted: i64 = conn.execute(
+    let promoted: i64 = tx.execute(
         "UPDATE note_folders SET parent_id = ?1, updated_at = ?2 WHERE parent_id = ?3",
         params![parent, now(), id],
     )? as i64;
-    let cleared: i64 = conn.execute(
+    let cleared: i64 = tx.execute(
         "UPDATE notes SET folder_id = NULL, updated_at = ?1 WHERE folder_id = ?2",
         params![now(), id],
     )? as i64;
-    conn.execute("DELETE FROM note_folders WHERE id = ?1", params![id])?;
+    tx.execute("DELETE FROM note_folders WHERE id = ?1", params![id])?;
+    tx.commit()?;
     Ok((cleared, promoted))
 }
 
