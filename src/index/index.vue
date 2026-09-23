@@ -49,6 +49,7 @@ const SettingsView = defineAsyncComponent({
   delay: 0,
 })
 const PromptManageDialog = defineAsyncComponent(() => import('../components/PromptManageDialog.vue'))
+const ImportDialog = defineAsyncComponent(() => import('../components/ImportDialog.vue'))
 const ChatPanel = defineAsyncComponent(() => import('../components/ChatPanel.vue'))
 const ExtensionCenter = defineAsyncComponent(() => import('../components/ExtensionCenter.vue'))
 const ExtensionView = defineAsyncComponent(() => import('../components/ExtensionView.vue'))
@@ -548,10 +549,12 @@ function onSaveNote(id: number, title: string, content: string) {
   store.saveNote(id, title, content)
 }
 
-/** Task 8 将挂 ImportDialog；此处先接好打开入口 */
 const importDialogVisible = ref(false)
 function onImportNotes() {
   importDialogVisible.value = true
+}
+function onImportDone() {
+  importDialogVisible.value = false
 }
 
 // ---- 全局搜索 / 设置 ----
@@ -964,6 +967,11 @@ provide('showToast', showToast)
     <PromptManageDialog
       :visible="promptManageVisible"
       @close="promptManageVisible = false"
+    />
+    <ImportDialog
+      :visible="importDialogVisible"
+      @close="importDialogVisible = false"
+      @done="onImportDone"
     />
 
     <Transition name="toast">
