@@ -514,6 +514,7 @@ pub fn run() {
             commands::list_installed_browsers,
             commands::open_url_with_browser,
             commands::create_note,
+            commands::set_note_source_path,
             commands::update_note,
             commands::delete_note,
             commands::list_notes,

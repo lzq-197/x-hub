@@ -16,13 +16,30 @@ pub fn index_note_stub(_note_id: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// 扫描结果（无 DB）：命令侧可先扫盘再短暂持锁写库。
+/// 扫描结果（无 DB）：仅路径列表；读文件见 [`load_prepared`]。
 pub struct ScanResult {
     pub scan_root: PathBuf,
     pub files: Vec<PathBuf>,
     /// walk 阶段跳过（非 md、超深目录提示等）
     pub pre_skipped: i64,
     pub pre_errors: Vec<String>,
+}
+
+/// 锁外读盘后的单条导入载荷（写库时不再碰文件系统）。
+pub struct PreparedItem {
+    pub source_path: String,
+    pub title: String,
+    pub content: String,
+    /// 相对路径的父目录段（用于 find_or_create_path）
+    pub folder_segments: Vec<String>,
+}
+
+/// 锁外准备完毕、可短锁写库的批次。
+pub struct PreparedImport {
+    pub items: Vec<PreparedItem>,
+    pub skipped: i64,
+    pub failed: i64,
+    pub errors: Vec<String>,
 }
 
 /// 仅文件系统扫描，不持 DB。
@@ -42,31 +59,58 @@ pub fn scan_import_path(path: &str) -> Result<ScanResult, String> {
     })
 }
 
-/// 在已持有的连接上导入候选文件列表。
-pub fn import_scanned(
-    conn: &Connection,
-    scan: ScanResult,
-) -> Result<ImportResult, String> {
+/// 锁外：截断超额、读文件、组载荷。不访问数据库。
+pub fn load_prepared(scan: ScanResult) -> PreparedImport {
     let mut errors = scan.pre_errors;
     let mut skipped = scan.pre_skipped;
+    let mut failed: i64 = 0;
     let mut paths = scan.files;
 
     if paths.len() > MAX_IMPORT_FILES {
-        let dropped = paths.len() - MAX_IMPORT_FILES;
+        let dropped = (paths.len() - MAX_IMPORT_FILES) as i64;
         paths.truncate(MAX_IMPORT_FILES);
+        skipped += dropped;
         push_error(
             &mut errors,
             format!("单次导入超过 2000 个文件，已截断（省略 {dropped} 个）"),
         );
     }
 
+    let mut items = Vec::with_capacity(paths.len());
+    for file in &paths {
+        match read_one(&scan.scan_root, file, &mut errors) {
+            Ok(ReadOne::Item(item)) => items.push(item),
+            Ok(ReadOne::Skipped) => skipped += 1,
+            Ok(ReadOne::Failed) => failed += 1,
+            Err(e) => {
+                failed += 1;
+                push_error(&mut errors, e);
+            }
+        }
+    }
+
+    PreparedImport {
+        items,
+        skipped,
+        failed,
+        errors,
+    }
+}
+
+/// 在已持有的连接上只做 DB 写入（不读盘）。
+pub fn import_prepared(
+    conn: &Connection,
+    prepared: PreparedImport,
+) -> Result<ImportResult, String> {
+    let mut errors = prepared.errors;
+    let skipped = prepared.skipped;
+    let mut failed = prepared.failed;
     let mut imported: i64 = 0;
     let mut updated: i64 = 0;
-    let mut failed: i64 = 0;
     let mut changed_ids: Vec<i64> = Vec::new();
 
-    for file in &paths {
-        match import_one(conn, &scan.scan_root, file, &mut errors) {
+    for item in &prepared.items {
+        match upsert_one(conn, item) {
             Ok(ImportOne::Imported(id)) => {
                 imported += 1;
                 changed_ids.push(id);
@@ -75,8 +119,6 @@ pub fn import_scanned(
                 updated += 1;
                 changed_ids.push(id);
             }
-            Ok(ImportOne::Skipped) => skipped += 1,
-            Ok(ImportOne::Failed) => failed += 1,
             Err(e) => {
                 failed += 1;
                 push_error(&mut errors, e);
@@ -91,36 +133,40 @@ pub fn import_scanned(
         updated,
         skipped,
         failed,
-        total: (imported + updated + skipped + failed) as i64,
+        total: imported + updated + skipped + failed,
         errors,
     })
 }
 
-/// 兼容测试与简单调用：扫盘 + 写库。
+/// 扫盘 → 读盘（无锁）→ 写库。测试与简单调用入口。
 pub fn import_markdown(conn: &Connection, path: &str) -> Result<ImportResult, String> {
     let scan = scan_import_path(path)?;
-    import_scanned(conn, scan)
+    let prepared = load_prepared(scan);
+    import_prepared(conn, prepared)
+}
+
+enum ReadOne {
+    Item(PreparedItem),
+    Skipped,
+    Failed,
 }
 
 enum ImportOne {
     Imported(i64),
     Updated(i64),
-    Skipped,
-    Failed,
 }
 
-fn import_one(
-    conn: &Connection,
+fn read_one(
     scan_root: &Path,
     file: &Path,
     errors: &mut Vec<String>,
-) -> Result<ImportOne, String> {
+) -> Result<ReadOne, String> {
     if !path_under_root(file, scan_root) {
         push_error(
             errors,
             format!("{}: 路径越界，已跳过", display_path(file)),
         );
-        return Ok(ImportOne::Failed);
+        return Ok(ReadOne::Failed);
     }
 
     let meta = fs::symlink_metadata(file).map_err(|e| format!("{}: {}", display_path(file), e))?;
@@ -129,14 +175,14 @@ fn import_one(
             errors,
             format!("{}: 跳过符号链接", display_path(file)),
         );
-        return Ok(ImportOne::Skipped);
+        return Ok(ReadOne::Skipped);
     }
     if meta.len() > MAX_FILE_BYTES {
         push_error(
             errors,
             format!("{}: 单文件超过 2MB", display_path(file)),
         );
-        return Ok(ImportOne::Failed);
+        return Ok(ReadOne::Failed);
     }
 
     let bytes = fs::read(file).map_err(|e| format!("{}: {}", display_path(file), e))?;
@@ -148,7 +194,7 @@ fn import_one(
         .to_path_buf();
     let source_path = normalize_source_path(&rel);
     if source_path.is_empty() {
-        return Ok(ImportOne::Skipped);
+        return Ok(ReadOne::Skipped);
     }
 
     let title = file
@@ -157,28 +203,58 @@ fn import_one(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "无标题笔记".into());
 
-    let folder_id = resolve_folder_id(conn, &rel)?;
+    let folder_segments = folder_segments_of(&rel);
 
-    match note::find_by_source_path(conn, &source_path).map_err(|e| e.to_string())? {
+    Ok(ReadOne::Item(PreparedItem {
+        source_path,
+        title,
+        content,
+        folder_segments,
+    }))
+}
+
+fn upsert_one(conn: &Connection, item: &PreparedItem) -> Result<ImportOne, String> {
+    let folder_id = if item.folder_segments.is_empty() {
+        None
+    } else {
+        let refs: Vec<&str> = item.folder_segments.iter().map(|s| s.as_str()).collect();
+        Some(
+            folder::find_or_create_path(conn, None, &refs).map_err(|e| e.to_string())?,
+        )
+    };
+
+    match note::find_by_source_path(conn, &item.source_path).map_err(|e| e.to_string())? {
         Some(existing) => {
-            let n = note::update_imported(conn, existing.id, &title, &content, folder_id)
-                .map_err(|e| e.to_string())?;
+            let n = note::update_imported(
+                conn,
+                existing.id,
+                &item.title,
+                &item.content,
+                folder_id,
+            )
+            .map_err(|e| e.to_string())?;
             Ok(ImportOne::Updated(n.id))
         }
         None => {
-            let n = note::create_imported(conn, &title, &content, folder_id, &source_path)
-                .map_err(|e| e.to_string())?;
+            let n = note::create_imported(
+                conn,
+                &item.title,
+                &item.content,
+                folder_id,
+                &item.source_path,
+            )
+            .map_err(|e| e.to_string())?;
             Ok(ImportOne::Imported(n.id))
         }
     }
 }
 
-fn resolve_folder_id(conn: &Connection, rel: &Path) -> Result<Option<i64>, String> {
+fn folder_segments_of(rel: &Path) -> Vec<String> {
     let parent = match rel.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
-        _ => return Ok(None),
+        _ => return Vec::new(),
     };
-    let segments: Vec<String> = parent
+    parent
         .components()
         .filter_map(|c| match c {
             std::path::Component::Normal(s) => {
@@ -192,14 +268,7 @@ fn resolve_folder_id(conn: &Connection, rel: &Path) -> Result<Option<i64>, Strin
             }
             _ => None,
         })
-        .collect();
-    if segments.is_empty() {
-        return Ok(None);
-    }
-    let refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
-    folder::find_or_create_path(conn, None, &refs)
-        .map(Some)
-        .map_err(|e| e.to_string())
+        .collect()
 }
 
 fn collect_candidates(
@@ -420,9 +489,6 @@ mod tests {
         let n1 = note::find_by_source_path(&conn, "old/x.md").unwrap().unwrap();
         let old_folder = n1.folder_id;
 
-        // 同内容换路径：新 source_path → 新笔记；本测验证「同 source_path 改目录」——
-        // 把文件挪到 new/ 但保留用旧键更新时，应改 folder。
-        // 实际导入键=相对路径，挪文件会变成新键。这里直接测 update_imported 迁文件夹：
         let new_folder = folder::create(&conn, None, "new").unwrap();
         note::update_imported(&conn, n1.id, "x", "body", Some(new_folder.id)).unwrap();
         let n2 = note::get(&conn, n1.id).unwrap();
@@ -450,13 +516,47 @@ mod tests {
     }
 
     #[test]
+    fn load_prepared_does_not_touch_db() {
+        let dir = temp_import_dir("no-db");
+        write_file(&dir.join("z.md"), "z");
+        let scan = scan_import_path(dir.to_str().unwrap()).unwrap();
+        let prepared = load_prepared(scan);
+        assert_eq!(prepared.items.len(), 1);
+        assert_eq!(prepared.items[0].title, "z");
+        assert_eq!(prepared.items[0].content, "z");
+        // 未打开任何 Connection —— 若误触 DB 会编译/运行期失败
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn scan_then_import_matches_direct() {
         let conn = init_in_memory().unwrap();
         let dir = temp_import_dir("scan");
         write_file(&dir.join("z.md"), "z");
         let scan = scan_import_path(dir.to_str().unwrap()).unwrap();
-        let r = import_scanned(&conn, scan).unwrap();
+        let prepared = load_prepared(scan);
+        let r = import_prepared(&conn, prepared).unwrap();
         assert_eq!(r.imported, 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn truncate_over_limit_counts_dropped_as_skipped() {
+        let mut files = Vec::new();
+        for i in 0..(MAX_IMPORT_FILES + 3) {
+            files.push(PathBuf::from(format!("f{i}.md")));
+        }
+        let scan = ScanResult {
+            scan_root: PathBuf::from("/tmp/xhub-fake"),
+            files,
+            pre_skipped: 0,
+            pre_errors: Vec::new(),
+        };
+        // 路径不存在 → 全部读失败，但截断的 3 个应先计入 skipped
+        let prepared = load_prepared(scan);
+        assert_eq!(prepared.skipped, 3);
+        assert_eq!(prepared.items.len(), 0);
+        assert_eq!(prepared.failed, MAX_IMPORT_FILES as i64);
+        assert!(prepared.errors.iter().any(|e| e.contains("截断")));
     }
 }

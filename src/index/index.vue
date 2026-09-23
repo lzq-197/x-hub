@@ -519,14 +519,7 @@ const activeNote = computed(
 )
 
 async function onCreateNote(folderId: number | null = null) {
-  const n = await store.addNote('无标题笔记')
-  if (folderId != null) {
-    try {
-      await store.setNoteFolder(n.id, folderId)
-    } catch (err) {
-      showToast(String(err))
-    }
-  }
+  const n = await store.addNote('无标题笔记', folderId)
   activeNoteId.value = n.id
   // 悬浮球等入口触发时可能停在其它视图：新建后必须切到速记页，否则只见新建不见页面
   activeView.value = 'notes'
@@ -539,15 +532,47 @@ function onSelectNote(id: number) {
 async function onDeleteNote(id: number) {
   const target = store.state.notes.find((n) => n.id === id)
   if (!target) return
+  let tagIds: number[] = []
+  if (isTauri()) {
+    try {
+      const tags = await tauriApi.getNoteTags(id)
+      tagIds = tags.map((t) => t.id)
+    } catch {
+      /* 标签读取失败仍允许删除；撤销时不恢复标签 */
+    }
+  }
+  const snapshot = {
+    title: target.title,
+    content: target.content,
+    folder_id: target.folder_id,
+    source_path: target.source_path,
+    tagIds,
+  }
   await store.removeNote(id)
   if (activeNoteId.value === id) activeNoteId.value = null
   showToast('笔记已删除', {
     label: '撤销',
     onClick: async () => {
-      const n = await store.addNote(target.title)
-      await store.saveNote(n.id, target.title, target.content)
-      activeNoteId.value = n.id
-      showToast('已恢复笔记')
+      try {
+        let n
+        try {
+          n = await store.addNote(snapshot.title, snapshot.folder_id)
+        } catch {
+          // 原文件夹已删除时退回未分类
+          n = await store.addNote(snapshot.title, null)
+        }
+        await store.saveNote(n.id, snapshot.title, snapshot.content)
+        if (snapshot.source_path) {
+          await store.setNoteSourcePath(n.id, snapshot.source_path)
+        }
+        if (snapshot.tagIds.length > 0) {
+          await store.setNoteTags(n.id, snapshot.tagIds)
+        }
+        activeNoteId.value = n.id
+        showToast('已恢复笔记')
+      } catch (err) {
+        showToast(String(err))
+      }
     },
   })
 }

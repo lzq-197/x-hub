@@ -885,10 +885,13 @@ export const tauriApi = {
   listInstalledBrowsers: () => invoke<InstalledBrowser[]>('list_installed_browsers'),
   openUrlWithBrowser: (id: number, browserExe: string) =>
     invoke<void>('open_url_with_browser', { id, browserExe }),
-  createNote: (title: string) => invoke<Note>('create_note', { title }),
+  createNote: (title: string, folderId?: number | null) =>
+    invoke<Note>('create_note', { title, folderId: folderId ?? null }),
   updateNote: (id: number, title: string, content: string) =>
     invoke<Note>('update_note', { id, title, content }),
   deleteNote: (id: number) => invoke<void>('delete_note', { id }),
+  setNoteSourcePath: (noteId: number, sourcePath: string | null) =>
+    invoke<Note>('set_note_source_path', { noteId, sourcePath }),
   listNotes: () => invoke<Note[]>('list_notes'),
   listNoteFolders: () => invoke<NoteFolder[]>('list_note_folders'),
   createNoteFolder: (parentId: number | null, name: string) =>

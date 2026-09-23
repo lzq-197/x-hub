@@ -227,13 +227,47 @@ pub fn launch_resource(state: State<'_, DbState>, id: i64) -> Result<(), String>
 // ---------- 笔记 ----------
 
 #[tauri::command]
-pub fn create_note(state: State<'_, DbState>, title: String) -> Result<Note, String> {
+pub fn create_note(
+    state: State<'_, DbState>,
+    title: String,
+    folder_id: Option<i64>,
+) -> Result<Note, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let note = note::create(&conn, &title).map_err(err_str)?;
-    log::info!("新建笔记: id={} ({})", note.id, note.title);
+    if let Some(fid) = folder_id {
+        folder::get(&conn, fid).map_err(err_str)?;
+    }
+    let note = note::create_with_folder(&conn, &title, folder_id).map_err(err_str)?;
+    log::info!(
+        "新建笔记: id={} ({}) folder={:?}",
+        note.id,
+        note.title,
+        folder_id
+    );
     let id = note.id;
     drop(conn);
     crate::kb_hooks::on_notes_changed(&[id]);
+    Ok(note)
+}
+
+#[tauri::command]
+pub fn set_note_source_path(
+    state: State<'_, DbState>,
+    note_id: i64,
+    source_path: Option<String>,
+) -> Result<Note, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let path_ref = source_path.as_deref();
+    if let Some(p) = path_ref {
+        if p.is_empty() {
+            return Err("source_path 不能为空字符串".into());
+        }
+    }
+    let note = note::set_source_path(&conn, note_id, path_ref).map_err(err_str)?;
+    log::info!(
+        "笔记 source_path: note_id={} path={:?}",
+        note_id,
+        source_path
+    );
     Ok(note)
 }
 
@@ -361,10 +395,11 @@ pub fn import_markdown(
     state: State<'_, DbState>,
     path: String,
 ) -> Result<ImportResult, String> {
-    // 先扫盘（不持锁），再短锁写库，避免大目录卡住其它命令
+    // 扫盘 + 读文件均在锁外；持锁只做 upsert / 建文件夹
     let scan = crate::knowledge::scan_import_path(&path)?;
+    let prepared = crate::knowledge::load_prepared(scan);
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let result = crate::knowledge::import_scanned(&conn, scan)?;
+    let result = crate::knowledge::import_prepared(&conn, prepared)?;
     log::info!(
         "Markdown 导入: path={} imported={} updated={} skipped={} failed={} total={}",
         path,

@@ -323,19 +323,20 @@ export function useStore() {
   }
 
   // ---- 笔记 ----
-  async function addNote(title: string) {
+  async function addNote(title: string, folderId: number | null = null) {
     const n = isTauri()
-      ? await tauriApi.createNote(title)
+      ? await tauriApi.createNote(title, folderId)
       : {
           id: Date.now(),
           title,
           content: '',
-          folder_id: null,
+          folder_id: folderId,
           source_path: null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }
     state.notes.unshift(n)
+    if (folderId != null) await refreshFolders()
     return n
   }
 
@@ -443,6 +444,27 @@ export function useStore() {
     if (idx >= 0) state.notes[idx] = note
     await refreshFolders()
     return note
+  }
+
+  async function setNoteSourcePath(noteId: number, sourcePath: string | null) {
+    if (!isTauri()) {
+      const i = state.notes.findIndex((n) => n.id === noteId)
+      if (i >= 0) state.notes[i] = { ...state.notes[i], source_path: sourcePath }
+      return state.notes[i]
+    }
+    const note = await tauriApi.setNoteSourcePath(noteId, sourcePath)
+    const idx = state.notes.findIndex((n) => n.id === noteId)
+    if (idx >= 0) {
+      // list 侧可能只有 meta；保留本地已有 content
+      const prev = state.notes[idx]
+      state.notes[idx] = { ...note, content: prev.content || note.content }
+    }
+    return note
+  }
+
+  async function setNoteTags(noteId: number, tagIds: number[]) {
+    if (!isTauri()) return
+    await tauriApi.setNoteTags(noteId, tagIds)
   }
 
   async function importMarkdown(path: string): Promise<ImportResult> {
@@ -1408,6 +1430,8 @@ export function useStore() {
     deleteFolder,
     moveFolder,
     setNoteFolder,
+    setNoteSourcePath,
+    setNoteTags,
     importMarkdown,
     searchAll,
     createTodo,

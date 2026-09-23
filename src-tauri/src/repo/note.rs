@@ -3,12 +3,30 @@ use crate::repo::now;
 use rusqlite::{params, Connection, Result};
 
 pub fn create(conn: &Connection, title: &str) -> Result<Note> {
+    create_with_folder(conn, title, None)
+}
+
+/// 新建笔记并可一次性归档到文件夹（单事务路径由调用方持锁）。
+pub fn create_with_folder(conn: &Connection, title: &str, folder_id: Option<i64>) -> Result<Note> {
     let ts = now();
     conn.execute(
-        "INSERT INTO notes (title, created_at, updated_at) VALUES (?1, ?2, ?2)",
-        params![title, ts],
+        "INSERT INTO notes (title, folder_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+        params![title, folder_id, ts],
     )?;
     get(conn, conn.last_insert_rowid())
+}
+
+pub fn set_source_path(conn: &Connection, note_id: i64, source_path: Option<&str>) -> Result<Note> {
+    let affected = conn.execute(
+        "UPDATE notes SET source_path = ?1, updated_at = ?2 WHERE id = ?3",
+        params![source_path, now(), note_id],
+    )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 笔记 {note_id} 不存在"
+        )));
+    }
+    get(conn, note_id)
 }
 
 pub fn get(conn: &Connection, id: i64) -> Result<Note> {
@@ -191,11 +209,32 @@ mod tests {
     }
 
     #[test]
-    fn import_key_updates_same_source_path() {
+    fn create_with_folder_sets_folder_id() {
         let conn = init_in_memory().unwrap();
-        let a = create_imported(&conn, "a", "v1", None, "docs/a.md").unwrap();
-        let b = update_imported(&conn, a.id, "a", "v2", None).unwrap();
-        assert_eq!(b.content, "v2");
-        assert!(find_by_source_path(&conn, "docs/a.md").unwrap().unwrap().id == a.id);
+        let f = crate::repo::folder::create(&conn, None, "工").unwrap();
+        let n = create_with_folder(&conn, "t", Some(f.id)).unwrap();
+        assert_eq!(n.folder_id, Some(f.id));
+    }
+
+    #[test]
+    fn source_path_unique_rejects_duplicate() {
+        let conn = init_in_memory().unwrap();
+        create_imported(&conn, "a", "1", None, "same.md").unwrap();
+        let err = create_imported(&conn, "b", "2", None, "same.md").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UNIQUE") || msg.contains("unique"),
+            "expected unique constraint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn set_source_path_roundtrip() {
+        let conn = init_in_memory().unwrap();
+        let n = create(&conn, "t").unwrap();
+        let n2 = set_source_path(&conn, n.id, Some("docs/a.md")).unwrap();
+        assert_eq!(n2.source_path.as_deref(), Some("docs/a.md"));
+        let n3 = set_source_path(&conn, n.id, None).unwrap();
+        assert_eq!(n3.source_path, None);
     }
 }
