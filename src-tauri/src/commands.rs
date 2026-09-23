@@ -2,14 +2,14 @@ use crate::browsers::{self, InstalledBrowser};
 use crate::config;
 use crate::config::AppConfig;
 use crate::models::{
-    ChatMessage, ChatModelConfig, ChatSession, ClipboardItem, Countdown, DetachedSticky, Note,
-    RepeatRule, Resource, ResourceKind, SearchResult, Snippet, Sticky, Tag, Todo, TodoOccurrence,
-    TodoTag, TodoTagLink,
+    ChatMessage, ChatModelConfig, ChatSession, ClipboardItem, Countdown, DetachedSticky,
+    ImportResult, Note, NoteFolder, RepeatRule, Resource, ResourceKind, SearchResult, Snippet,
+    Sticky, Tag, Todo, TodoOccurrence, TodoTag, TodoTagLink,
 };
 use crate::process;
 use crate::repo::{
-    chat, clipboard, countdown, detached_sticky, note, resource, snippet, sticky, tag, todo,
-    todo_tag,
+    chat, clipboard, countdown, detached_sticky, folder, note, resource, snippet, sticky, tag,
+    todo, todo_tag,
 };
 use crate::todo_recurrence;
 use rusqlite::Connection;
@@ -231,6 +231,9 @@ pub fn create_note(state: State<'_, DbState>, title: String) -> Result<Note, Str
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let note = note::create(&conn, &title).map_err(err_str)?;
     log::info!("新建笔记: id={} ({})", note.id, note.title);
+    let id = note.id;
+    drop(conn);
+    crate::kb_hooks::on_notes_changed(&[id]);
     Ok(note)
 }
 
@@ -244,6 +247,8 @@ pub fn update_note(
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let note = note::update(&conn, id, &title, &content).map_err(err_str)?;
     log::debug!("更新笔记: id={} 内容 {} 字", id, content.chars().count());
+    drop(conn);
+    crate::kb_hooks::on_notes_changed(&[id]);
     Ok(note)
 }
 
@@ -261,6 +266,118 @@ pub fn delete_note(state: State<'_, DbState>, id: i64) -> Result<(), String> {
 pub fn list_notes(state: State<'_, DbState>) -> Result<Vec<Note>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     note::list_meta(&conn).map_err(err_str)
+}
+
+// ---------- 速记文件夹 / Markdown 导入 / 索引 stub ----------
+
+#[tauri::command]
+pub fn list_note_folders(state: State<'_, DbState>) -> Result<Vec<NoteFolder>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    folder::list(&conn).map_err(err_str)
+}
+
+#[tauri::command]
+pub fn create_note_folder(
+    state: State<'_, DbState>,
+    parent_id: Option<i64>,
+    name: String,
+) -> Result<NoteFolder, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let folder = folder::create(&conn, parent_id, &name).map_err(err_str)?;
+    log::info!(
+        "新建文件夹: id={} ({}) parent={:?}",
+        folder.id,
+        folder.name,
+        parent_id
+    );
+    Ok(folder)
+}
+
+#[tauri::command]
+pub fn rename_note_folder(
+    state: State<'_, DbState>,
+    id: i64,
+    name: String,
+) -> Result<NoteFolder, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let folder = folder::rename(&conn, id, &name).map_err(err_str)?;
+    log::info!("重命名文件夹: id={} -> {}", id, folder.name);
+    Ok(folder)
+}
+
+#[tauri::command]
+pub fn move_note_folder(
+    state: State<'_, DbState>,
+    id: i64,
+    new_parent_id: Option<i64>,
+) -> Result<NoteFolder, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let folder = folder::move_folder(&conn, id, new_parent_id).map_err(err_str)?;
+    log::info!(
+        "移动文件夹: id={} -> parent={:?}",
+        id,
+        new_parent_id
+    );
+    Ok(folder)
+}
+
+#[tauri::command]
+pub fn delete_note_folder(
+    state: State<'_, DbState>,
+    id: i64,
+    move_to: Option<i64>,
+) -> Result<(), String> {
+    if move_to.is_some() {
+        return Err("本版本不支持迁移删除".into());
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let (cleared, promoted) = folder::delete_promote(&conn, id).map_err(err_str)?;
+    log::info!(
+        "删除文件夹(升迁): id={} 笔记未分类={} 子文件夹升迁={}",
+        id,
+        cleared,
+        promoted
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_note_folder(
+    state: State<'_, DbState>,
+    note_id: i64,
+    folder_id: Option<i64>,
+) -> Result<Note, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(fid) = folder_id {
+        folder::get(&conn, fid).map_err(err_str)?;
+    }
+    let note = note::set_folder(&conn, note_id, folder_id).map_err(err_str)?;
+    log::info!("笔记归档: note_id={} folder_id={:?}", note_id, folder_id);
+    Ok(note)
+}
+
+#[tauri::command]
+pub fn import_markdown(
+    state: State<'_, DbState>,
+    path: String,
+) -> Result<ImportResult, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let result = crate::knowledge::import_markdown(&conn, &path)?;
+    log::info!(
+        "Markdown 导入: path={} imported={} updated={} failed={} total={}",
+        path,
+        result.imported,
+        result.updated,
+        result.failed,
+        result.total
+    );
+    Ok(result)
+}
+
+/// 索引 stub：无副作用，供导入/保存调用点预留（RAG 段替换实现）
+#[tauri::command]
+pub fn kb_index_note(_note_id: i64) -> Result<(), String> {
+    crate::knowledge::index_note_stub(_note_id)
 }
 
 // ---------- 待办清单 ----------

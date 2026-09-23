@@ -16,6 +16,8 @@ mod extension;
 mod ext_protocol;
 mod floating_ball;
 mod float_window;
+mod kb_hooks;
+mod knowledge;
 pub mod market;
 mod models;
 mod notify;
@@ -515,6 +517,14 @@ pub fn run() {
             commands::update_note,
             commands::delete_note,
             commands::list_notes,
+            commands::list_note_folders,
+            commands::create_note_folder,
+            commands::rename_note_folder,
+            commands::move_note_folder,
+            commands::delete_note_folder,
+            commands::set_note_folder,
+            commands::import_markdown,
+            commands::kb_index_note,
             commands::list_todos,
             commands::create_todo,
             commands::toggle_todo,
