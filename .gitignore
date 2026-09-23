@@ -34,6 +34,7 @@ components.d.ts
 .playwright-mcp/
 .agents/
 .codegraph/
+.cursor/
 .opencode/
 .opencode-sessions/
 skills-lock.json
