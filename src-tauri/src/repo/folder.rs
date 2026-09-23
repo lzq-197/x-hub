@@ -5,7 +5,12 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: i64 = 8;
 
-pub fn create(conn: &Connection, parent_id: Option<i64>, name: &str) -> Result<NoteFolder> {
+pub fn create(
+    conn: &Connection,
+    parent_id: Option<i64>,
+    name: &str,
+    sort_order: Option<i64>,
+) -> Result<NoteFolder> {
     let name = name.trim();
     if name.is_empty() {
         return Err(rusqlite::Error::InvalidParameterName(
@@ -30,12 +35,34 @@ pub fn create(conn: &Connection, parent_id: Option<i64>, name: &str) -> Result<N
         ));
     }
 
+    let sort = sort_order.unwrap_or(next_sibling_sort(conn, parent_id)?);
     let ts = now();
     conn.execute(
-        "INSERT INTO note_folders (parent_id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-        params![parent_id, name, ts],
+        "INSERT INTO note_folders (parent_id, name, sort_order, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![parent_id, name, sort, ts],
     )?;
     get(conn, conn.last_insert_rowid())
+}
+
+pub fn reorder(conn: &Connection, ids: &[i64]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    for &id in ids {
+        let f = get(conn, id)?;
+        if f.parent_id.is_some() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "INVALID_ARGUMENT: 本版本仅支持根级文件夹排序".into(),
+            ));
+        }
+    }
+    for (i, &id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE note_folders SET sort_order = ?1, updated_at = ?2 WHERE id = ?3",
+            params![(i as i64) + 1, now(), id],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn rename(conn: &Connection, id: i64, name: &str) -> Result<NoteFolder> {
@@ -234,11 +261,27 @@ pub fn depth_of(conn: &Connection, id: i64) -> Result<i64> {
     Ok(depth)
 }
 
+fn next_sibling_sort(conn: &Connection, parent_id: Option<i64>) -> Result<i64> {
+    let max: Option<i64> = match parent_id {
+        Some(pid) => conn.query_row(
+            "SELECT MAX(sort_order) FROM note_folders WHERE parent_id = ?1",
+            params![pid],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT MAX(sort_order) FROM note_folders WHERE parent_id IS NULL",
+            [],
+            |r| r.get(0),
+        )?,
+    };
+    Ok(max.unwrap_or(0) + 1)
+}
+
 fn find_or_create_one(conn: &Connection, parent_id: Option<i64>, name: &str) -> Result<i64> {
     if let Some(existing) = find_child_by_name(conn, parent_id, name)? {
         return Ok(existing);
     }
-    Ok(create(conn, parent_id, name)?.id)
+    Ok(create(conn, parent_id, name, None)?.id)
 }
 
 fn find_child_by_name(
@@ -326,10 +369,43 @@ mod tests {
     use crate::repo::note;
 
     #[test]
+    fn create_assigns_incrementing_sort_among_siblings() {
+        let conn = init_in_memory().unwrap();
+        let a = create(&conn, None, "A", None).unwrap();
+        let b = create(&conn, None, "B", None).unwrap();
+        assert_eq!(a.sort_order, 1);
+        assert_eq!(b.sort_order, 2);
+    }
+
+    #[test]
+    fn reorder_root_folders_rewrites_sort_order() {
+        let conn = init_in_memory().unwrap();
+        let a = create(&conn, None, "A", None).unwrap();
+        let b = create(&conn, None, "B", None).unwrap();
+        let c = create(&conn, None, "C", None).unwrap();
+        reorder(&conn, &[c.id, a.id, b.id]).unwrap();
+        let list = list(&conn).unwrap();
+        let by_id: std::collections::HashMap<_, _> =
+            list.iter().map(|f| (f.id, f.sort_order)).collect();
+        assert_eq!(by_id[&c.id], 1);
+        assert_eq!(by_id[&a.id], 2);
+        assert_eq!(by_id[&b.id], 3);
+    }
+
+    #[test]
+    fn reorder_rejects_non_root_mix() {
+        let conn = init_in_memory().unwrap();
+        let root = create(&conn, None, "R", None).unwrap();
+        let child = create(&conn, Some(root.id), "C", None).unwrap();
+        let err = reorder(&conn, &[root.id, child.id]).unwrap_err();
+        assert!(err.to_string().contains("INVALID") || err.to_string().contains("根"));
+    }
+
+    #[test]
     fn delete_promotes_children_and_unclassifies_direct_notes() {
         let conn = init_in_memory().unwrap();
-        let root = create(&conn, None, "工作").unwrap();
-        let child = create(&conn, Some(root.id), "项目").unwrap();
+        let root = create(&conn, None, "工作", None).unwrap();
+        let child = create(&conn, Some(root.id), "项目", None).unwrap();
         let n = note::create(&conn, "直属").unwrap();
         note::set_folder(&conn, n.id, Some(root.id)).unwrap();
         let n2 = note::create(&conn, "子内").unwrap();
@@ -348,8 +424,8 @@ mod tests {
     #[test]
     fn move_rejects_cycle() {
         let conn = init_in_memory().unwrap();
-        let a = create(&conn, None, "A").unwrap();
-        let b = create(&conn, Some(a.id), "B").unwrap();
+        let a = create(&conn, None, "A", None).unwrap();
+        let b = create(&conn, Some(a.id), "B", None).unwrap();
         let err = move_folder(&conn, a.id, Some(b.id)).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("环") || msg.contains("子孙") || msg.contains("INVALID"));
@@ -358,8 +434,8 @@ mod tests {
     #[test]
     fn create_rejects_sibling_duplicate_name() {
         let conn = init_in_memory().unwrap();
-        create(&conn, None, "工作").unwrap();
-        let err = create(&conn, None, "工作").unwrap_err();
+        create(&conn, None, "工作", None).unwrap();
+        let err = create(&conn, None, "工作", None).unwrap_err();
         assert!(err.to_string().contains("同名"));
     }
 }

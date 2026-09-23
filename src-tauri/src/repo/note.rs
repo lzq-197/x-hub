@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn create_with_folder_sets_folder_id() {
         let conn = init_in_memory().unwrap();
-        let f = crate::repo::folder::create(&conn, None, "工").unwrap();
+        let f = crate::repo::folder::create(&conn, None, "工", None).unwrap();
         let n = create_with_folder(&conn, "t", Some(f.id)).unwrap();
         assert_eq!(n.folder_id, Some(f.id));
     }

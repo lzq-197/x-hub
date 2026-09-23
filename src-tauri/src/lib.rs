@@ -522,6 +522,7 @@ pub fn run() {
             commands::create_note_folder,
             commands::rename_note_folder,
             commands::move_note_folder,
+            commands::reorder_note_folders,
             commands::delete_note_folder,
             commands::set_note_folder,
             commands::import_markdown,

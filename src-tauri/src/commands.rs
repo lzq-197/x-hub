@@ -315,9 +315,10 @@ pub fn create_note_folder(
     state: State<'_, DbState>,
     parent_id: Option<i64>,
     name: String,
+    sort_order: Option<i64>,
 ) -> Result<NoteFolder, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let folder = folder::create(&conn, parent_id, &name).map_err(err_str)?;
+    let folder = folder::create(&conn, parent_id, &name, sort_order).map_err(err_str)?;
     log::info!(
         "新建文件夹: id={} ({}) parent={:?}",
         folder.id,
@@ -353,6 +354,14 @@ pub fn move_note_folder(
         new_parent_id
     );
     Ok(folder)
+}
+
+#[tauri::command]
+pub fn reorder_note_folders(state: State<'_, DbState>, ids: Vec<i64>) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    folder::reorder(&conn, &ids).map_err(err_str)?;
+    log::info!("文件夹重排: {:?}", ids);
+    Ok(())
 }
 
 #[tauri::command]

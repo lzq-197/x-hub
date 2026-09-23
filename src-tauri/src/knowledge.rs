@@ -489,7 +489,7 @@ mod tests {
         let n1 = note::find_by_source_path(&conn, "old/x.md").unwrap().unwrap();
         let old_folder = n1.folder_id;
 
-        let new_folder = folder::create(&conn, None, "new").unwrap();
+        let new_folder = folder::create(&conn, None, "new", None).unwrap();
         note::update_imported(&conn, n1.id, "x", "body", Some(new_folder.id)).unwrap();
         let n2 = note::get(&conn, n1.id).unwrap();
         assert_eq!(n2.folder_id, Some(new_folder.id));
