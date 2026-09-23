@@ -69,6 +69,51 @@ pub fn delete(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn find_by_source_path(conn: &Connection, path: &str) -> Result<Option<Note>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, content, folder_id, source_path, created_at, updated_at FROM notes WHERE source_path = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![path])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row_to_note(row)?)),
+        None => Ok(None),
+    }
+}
+
+pub fn create_imported(
+    conn: &Connection,
+    title: &str,
+    content: &str,
+    folder_id: Option<i64>,
+    source_path: &str,
+) -> Result<Note> {
+    let ts = now();
+    conn.execute(
+        "INSERT INTO notes (title, content, folder_id, source_path, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?5)",
+        params![title, content, folder_id, source_path, ts],
+    )?;
+    get(conn, conn.last_insert_rowid())
+}
+
+pub fn update_imported(
+    conn: &Connection,
+    id: i64,
+    title: &str,
+    content: &str,
+    folder_id: Option<i64>,
+) -> Result<Note> {
+    let affected = conn.execute(
+        "UPDATE notes SET title=?1, content=?2, folder_id=?3, updated_at=?4 WHERE id=?5",
+        params![title, content, folder_id, now(), id],
+    )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 笔记 {id} 不存在"
+        )));
+    }
+    get(conn, id)
+}
+
 pub fn search(conn: &Connection, keyword: &str) -> Result<Vec<Note>> {
     let pattern = format!("%{}%", keyword);
     let mut stmt = conn.prepare(
@@ -143,5 +188,14 @@ mod tests {
         let by_content = search(&conn, "发布计划").unwrap();
         assert_eq!(by_content.len(), 1);
         assert_eq!(by_content[0].id, second.id);
+    }
+
+    #[test]
+    fn import_key_updates_same_source_path() {
+        let conn = init_in_memory().unwrap();
+        let a = create_imported(&conn, "a", "v1", None, "docs/a.md").unwrap();
+        let b = update_imported(&conn, a.id, "a", "v2", None).unwrap();
+        assert_eq!(b.content, "v2");
+        assert!(find_by_source_path(&conn, "docs/a.md").unwrap().unwrap().id == a.id);
     }
 }
