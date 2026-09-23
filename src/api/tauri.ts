@@ -26,8 +26,34 @@ export interface Note {
   id: number
   title: string
   content: string
+  /** 所属文件夹；未分类为 null */
+  folder_id?: number | null
+  /** Markdown 导入去重键（相对路径）；手写笔记为 null */
+  source_path?: string | null
   created_at: string
   updated_at: string
+}
+
+/** 速记文件夹（树节点 + 计数） */
+export interface NoteFolder {
+  id: number
+  parent_id: number | null
+  name: string
+  sort_order: number
+  notes_count: number
+  subtree_notes: number
+  created_at: string
+  updated_at: string
+}
+
+/** Markdown 目录导入结果 */
+export interface ImportResult {
+  imported: number
+  updated: number
+  skipped: number
+  failed: number
+  total: number
+  errors: string[]
 }
 
 export interface Todo {
@@ -864,6 +890,21 @@ export const tauriApi = {
     invoke<Note>('update_note', { id, title, content }),
   deleteNote: (id: number) => invoke<void>('delete_note', { id }),
   listNotes: () => invoke<Note[]>('list_notes'),
+  listNoteFolders: () => invoke<NoteFolder[]>('list_note_folders'),
+  createNoteFolder: (parentId: number | null, name: string) =>
+    invoke<NoteFolder>('create_note_folder', { parentId, name }),
+  renameNoteFolder: (id: number, name: string) =>
+    invoke<NoteFolder>('rename_note_folder', { id, name }),
+  moveNoteFolder: (id: number, newParentId: number | null) =>
+    invoke<NoteFolder>('move_note_folder', { id, newParentId }),
+  /** moveTo 本版本仅允许 null（升迁删除）；传非 null 后端会拒 */
+  deleteNoteFolder: (id: number, moveTo: number | null = null) =>
+    invoke<void>('delete_note_folder', { id, moveTo }),
+  setNoteFolder: (noteId: number, folderId: number | null) =>
+    invoke<Note>('set_note_folder', { noteId, folderId }),
+  importMarkdown: (path: string) => invoke<ImportResult>('import_markdown', { path }),
+  /** 索引 stub：无副作用，供导入/保存调用点预留 */
+  kbIndexNote: (noteId: number) => invoke<void>('kb_index_note', { noteId }),
   searchAll: (keyword: string) => invoke<SearchResult>('search_all', { keyword }),
   listTodos: () => invoke<Todo[]>('list_todos'),
   createTodo: (title: string, parentId?: number | null, createdAt?: string) =>

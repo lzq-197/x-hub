@@ -9,7 +9,9 @@ import {
   type Countdown,
   type DetachedSticky,
   type GeoLocation,
+  type ImportResult,
   type Note,
+  type NoteFolder,
   type Quote,
   type Resource,
   type Snippet,
@@ -35,6 +37,8 @@ const DEFAULT_GLOBAL_SHORTCUT = IS_MAC_PREVIEW
 interface StoreState {
   resources: Resource[]
   notes: Note[]
+  /** 速记文件夹树（扁平列表，parent_id 成树） */
+  folders: NoteFolder[]
   todos: Todo[]
   stickies: Sticky[]
   detached: DetachedSticky[]
@@ -56,6 +60,7 @@ interface StoreState {
 const state = reactive<StoreState>({
   resources: [],
   notes: [],
+  folders: [],
   todos: [],
   stickies: [],
   detached: [],
@@ -165,6 +170,8 @@ export function useStore() {
     state.loaded = true
     // 待办标签与关联单独拉（不进 get_initial_data：老库/老版本兼容面更小）
     void refreshTodoTags()
+    // 速记文件夹同理：InitialData 未扩展时单独 listNoteFolders
+    void refreshFolders()
   }
 
   // ---- 提示词百宝箱 ----
@@ -319,7 +326,15 @@ export function useStore() {
   async function addNote(title: string) {
     const n = isTauri()
       ? await tauriApi.createNote(title)
-      : { id: Date.now(), title, content: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+      : {
+          id: Date.now(),
+          title,
+          content: '',
+          folder_id: null,
+          source_path: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }
     state.notes.unshift(n)
     return n
   }
@@ -327,7 +342,15 @@ export function useStore() {
   async function saveNote(id: number, title: string, content: string) {
     const n = isTauri()
       ? await tauriApi.updateNote(id, title, content)
-      : { id, title, content, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+      : {
+          id,
+          title,
+          content,
+          folder_id: state.notes.find((x) => x.id === id)?.folder_id ?? null,
+          source_path: state.notes.find((x) => x.id === id)?.source_path ?? null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }
     const idx = state.notes.findIndex((x) => x.id === id)
     if (idx >= 0) state.notes[idx] = n
     return n
@@ -342,6 +365,88 @@ export function useStore() {
   async function refreshNotes() {
     if (!isTauri()) return
     state.notes = await tauriApi.listNotes()
+  }
+
+  // ---- 速记文件夹 / Markdown 导入 ----
+  async function refreshFolders() {
+    if (!isTauri()) return
+    state.folders = await tauriApi.listNoteFolders().catch(() => [] as NoteFolder[])
+  }
+
+  async function createFolder(parentId: number | null, name: string) {
+    if (!isTauri()) {
+      const folder: NoteFolder = {
+        id: Date.now(),
+        parent_id: parentId,
+        name,
+        sort_order: state.folders.length,
+        notes_count: 0,
+        subtree_notes: 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }
+      state.folders.push(folder)
+      return folder
+    }
+    const folder = await tauriApi.createNoteFolder(parentId, name)
+    await refreshFolders()
+    return folder
+  }
+
+  async function renameFolder(id: number, name: string) {
+    if (!isTauri()) {
+      const i = state.folders.findIndex((f) => f.id === id)
+      if (i >= 0) state.folders[i] = { ...state.folders[i], name, updated_at: new Date().toISOString() }
+      return state.folders[i]
+    }
+    const folder = await tauriApi.renameNoteFolder(id, name)
+    await refreshFolders()
+    return folder
+  }
+
+  async function deleteFolder(id: number) {
+    if (!isTauri()) {
+      state.folders = state.folders.filter((f) => f.id !== id)
+      for (const n of state.notes) {
+        if (n.folder_id === id) n.folder_id = null
+      }
+      return
+    }
+    await tauriApi.deleteNoteFolder(id, null)
+    await Promise.all([refreshNotes(), refreshFolders()])
+  }
+
+  async function moveFolder(id: number, newParentId: number | null) {
+    if (!isTauri()) {
+      const i = state.folders.findIndex((f) => f.id === id)
+      if (i >= 0) state.folders[i] = { ...state.folders[i], parent_id: newParentId }
+      return state.folders[i]
+    }
+    const folder = await tauriApi.moveNoteFolder(id, newParentId)
+    await refreshFolders()
+    return folder
+  }
+
+  async function setNoteFolder(noteId: number, folderId: number | null) {
+    if (!isTauri()) {
+      const i = state.notes.findIndex((n) => n.id === noteId)
+      if (i >= 0) state.notes[i] = { ...state.notes[i], folder_id: folderId }
+      return state.notes[i]
+    }
+    const note = await tauriApi.setNoteFolder(noteId, folderId)
+    const idx = state.notes.findIndex((n) => n.id === noteId)
+    if (idx >= 0) state.notes[idx] = note
+    await refreshFolders()
+    return note
+  }
+
+  async function importMarkdown(path: string): Promise<ImportResult> {
+    if (!isTauri()) {
+      return { imported: 0, updated: 0, skipped: 0, failed: 0, total: 0, errors: [] }
+    }
+    const result = await tauriApi.importMarkdown(path)
+    await Promise.all([refreshNotes(), refreshFolders()])
+    return result
   }
 
   async function searchAll(keyword: string) {
@@ -1292,6 +1397,13 @@ export function useStore() {
     saveNote,
     removeNote,
     refreshNotes,
+    refreshFolders,
+    createFolder,
+    renameFolder,
+    deleteFolder,
+    moveFolder,
+    setNoteFolder,
+    importMarkdown,
     searchAll,
     createTodo,
     toggleTodo,
