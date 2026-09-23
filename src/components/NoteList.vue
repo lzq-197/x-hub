@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, inject, onMounted, ref, watch } from 'vue'
+import { computed, inject, onMounted, ref } from 'vue'
 import { Import, Plus, StickyNote, X } from 'lucide-vue-next'
 import type { Note } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { markdownPlainText } from '../utils/markdown'
 import { parseTimestamp } from '../utils/time'
-import { useFolderChildren, type FolderFilter } from '../composables/useNoteFolders'
+import { useFolderChildren } from '../composables/useNoteFolders'
 import AppSelect, { type AppSelectOption } from './AppSelect.vue'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 import NoteFolderTree from './NoteFolderTree.vue'
@@ -17,7 +17,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'select', id: number): void
-  /** folderId：当前树选中的真实文件夹；未分类/全部则为 null */
+  /** folderId：当前树选中的真实文件夹；未选则为 null（顶级） */
   (e: 'create', folderId: number | null): void
   (e: 'delete', id: number): void
   (e: 'import-request'): void
@@ -28,6 +28,8 @@ const showToast = inject<(msg: string) => void>('showToast', () => {})
 
 const activeTagId = ref<number | null>(null)
 const tagMap = ref<Map<number, number[]>>(new Map())
+/** Task 3 树选中夹；Task 4 会去掉下方 nl-list，此筛选仅过渡期用 */
+const selectedFolderId = ref<number | null>(null)
 
 onMounted(async () => {
   const rows = await store.loadNoteTagsMap()
@@ -40,39 +42,21 @@ onMounted(async () => {
   tagMap.value = map
 })
 
-const folderFilter = ref<FolderFilter>('all')
 const { flatFolderOptions } = useFolderChildren(computed(() => store.state.folders))
 
-const expandForFolderId = computed(() => {
-  if (props.activeId == null) return null
-  const note = props.notes.find((n) => n.id === props.activeId)
-  return note?.folder_id ?? null
-})
-
 function emitCreate() {
-  const folderId = typeof folderFilter.value === 'number' ? folderFilter.value : null
-  emit('create', folderId)
+  emit('create', selectedFolderId.value)
 }
 
-/** 打开笔记时：非「全部」才同步筛选；展开父链由 NoteFolderTree 负责 */
-watch(
-  () => props.activeId,
-  (id) => {
-    if (id == null) return
-    const note = props.notes.find((n) => n.id === id)
-    if (!note) return
-    if (folderFilter.value === 'all') return
-    folderFilter.value = note.folder_id == null ? 'uncategorized' : note.folder_id
-  },
-  { immediate: true },
-)
+function onSelectFolder(id: number | null) {
+  selectedFolderId.value = id
+}
 
+/** Task 4 将去掉；过渡期仍按选中夹过滤下方列表 */
 const sortedNotes = computed(() => {
   let list = [...props.notes]
-  if (folderFilter.value === 'uncategorized') {
-    list = list.filter((n) => n.folder_id == null)
-  } else if (typeof folderFilter.value === 'number') {
-    const fid = folderFilter.value
+  if (selectedFolderId.value != null) {
+    const fid = selectedFolderId.value
     list = list.filter((n) => n.folder_id === fid)
   }
   list.sort((a, b) => parseTimestamp(b.updated_at) - parseTimestamp(a.updated_at))
@@ -118,7 +102,7 @@ function onNoteContext(e: MouseEvent, note: Note) {
   e.stopPropagation()
   const items: ContextMenuItem[] = [
     {
-      label: '移到未分类',
+      label: '移到顶级',
       onClick: () => void moveNoteToFolder(note.id, null),
     },
     {
@@ -152,26 +136,24 @@ async function moveNoteToFolder(noteId: number, folderId: number | null) {
 }
 
 const noteMoveTarget = ref<Note | null>(null)
-const noteMoveFolderValue = ref('uncategorized')
+const noteMoveFolderValue = ref('top')
 
 const noteMoveOptions = computed((): AppSelectOption[] => {
   if (!noteMoveTarget.value) return []
-  return [{ value: 'uncategorized', label: '未分类' }, ...flatFolderOptions(null)]
+  return [{ value: 'top', label: '顶级' }, ...flatFolderOptions(null)]
 })
 
 function openNoteMoveDialog(note: Note) {
   noteMoveTarget.value = note
   noteMoveFolderValue.value =
-    note.folder_id == null ? 'uncategorized' : String(note.folder_id)
+    note.folder_id == null ? 'top' : String(note.folder_id)
 }
 
 async function confirmNoteMove() {
   const note = noteMoveTarget.value
   if (!note) return
   const folderId =
-    noteMoveFolderValue.value === 'uncategorized'
-      ? null
-      : Number(noteMoveFolderValue.value)
+    noteMoveFolderValue.value === 'top' ? null : Number(noteMoveFolderValue.value)
   noteMoveTarget.value = null
   await moveNoteToFolder(note.id, folderId)
 }
@@ -212,9 +194,11 @@ async function confirmNoteMove() {
 
     <div class="nl-split">
       <NoteFolderTree
-        v-model="folderFilter"
         :notes="notes"
-        :expand-for-folder-id="expandForFolderId"
+        :active-note-id="activeId"
+        :selected-folder-id="selectedFolderId"
+        @select-note="emit('select', $event)"
+        @select-folder="onSelectFolder"
       />
 
       <div class="nl-list">
@@ -250,7 +234,7 @@ async function confirmNoteMove() {
 
         <div v-else class="empty-state">
           <StickyNote :size="24" :stroke-width="1.7" aria-hidden="true" />
-          <p>{{ folderFilter === 'all' ? '还没有笔记' : '此文件夹暂无笔记' }}</p>
+          <p>{{ selectedFolderId == null ? '还没有笔记' : '此文件夹暂无笔记' }}</p>
           <button class="pill-btn" type="button" style="margin-top: 6px" @click="emitCreate">
             新建笔记
           </button>
