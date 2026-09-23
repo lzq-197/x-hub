@@ -66,6 +66,22 @@ const localContent = ref('')
 const dirty = ref(false)
 const previewHtml = computed(() => renderNoteMarkdown(localContent.value))
 
+/** 从 folders 树拼出「父 / 子」路径；未分类笔记不展示 */
+const noteFolderPath = computed(() => {
+  const fid = props.note?.folder_id
+  if (fid == null) return ''
+  const byId = new Map(store.state.folders.map((f) => [f.id, f]))
+  const parts: string[] = []
+  let cur: number | null = fid
+  while (cur != null) {
+    const f = byId.get(cur)
+    if (!f) break
+    parts.unshift(f.name)
+    cur = f.parent_id
+  }
+  return parts.join(' / ')
+})
+
 // ---- 生命周期 ----
 onBeforeUnmount(() => {
   flushPendingSave()
@@ -1019,6 +1035,7 @@ function onEditorAreaMouseDown(e: MouseEvent) {
           <Trash2 :size="14" :stroke-width="1.8" />
         </button>
       </header>
+      <p v-if="noteFolderPath" class="ed-folder-path">{{ noteFolderPath }}</p>
 
       <div v-if="mode === 'wysiwyg'" ref="rootEl" class="crepe-root" @mousedown.capture="onEditorAreaMouseDown"></div>
       <textarea
@@ -1153,6 +1170,13 @@ function onEditorAreaMouseDown(e: MouseEvent) {
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.ed-folder-path {
+  margin: -6px 0 10px;
+  font-size: 0.75em;
+  color: var(--text-3);
+  line-height: 1.3;
 }
 
 .ed-title-input {

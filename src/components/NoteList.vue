@@ -156,7 +156,7 @@ function toggleExpand(id: number, e: Event) {
   expanded.value = next
 }
 
-/** 选中笔记时展开其父链并切到对应文件夹（全局搜索跳转等） */
+/** 打开笔记时同步文件夹筛选并展开父链（列表选中 / 全局搜索跳转） */
 watch(
   () => props.activeId,
   (id) => {
@@ -164,9 +164,10 @@ watch(
     const note = props.notes.find((n) => n.id === id)
     if (!note) return
     if (note.folder_id == null) {
-      // 不强制切筛选，仅保证未分类可见
+      folderFilter.value = 'uncategorized'
       return
     }
+    folderFilter.value = note.folder_id
     const next = new Set(expanded.value)
     let cur: number | null = note.folder_id
     const byId = new Map(store.state.folders.map((f) => [f.id, f]))
@@ -176,6 +177,7 @@ watch(
     }
     expanded.value = next
   },
+  { immediate: true },
 )
 
 // ---- 列表过滤（文件夹 ∩ 标签）----
