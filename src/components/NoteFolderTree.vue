@@ -180,7 +180,20 @@ function bumpSort(delta: number) {
 function onSortStepPointer(e: MouseEvent) {
   const el = e.currentTarget as HTMLElement
   const mid = el.getBoundingClientRect().height / 2
-  bumpSort(e.offsetY < mid ? 1 : -1)
+  bumpSort(e.offsetY < mid ? -1 : 1)
+}
+
+function onFolderPlusClick() {
+  const parent = props.selectedFolderId ?? null
+  startCreate(parent)
+}
+
+function onTreeBodyClick(e: MouseEvent) {
+  const t = e.target as HTMLElement | null
+  if (!t) return
+  if (t.closest('.tree-row, .edit-row, .tree-drop-line, button, input')) return
+  if (editing.value) cancelEdit()
+  emit('select-folder', null)
 }
 
 async function applyRootSort(folderId: number, desiredSort: number) {
@@ -512,12 +525,12 @@ defineExpose({ flatFolderOptions })
         class="icon-btn nl-tree-add"
         type="button"
         title="新建文件夹"
-        @click="startCreate(null)"
+        @click="onFolderPlusClick"
       >
         <FolderPlus :size="14" :stroke-width="2" />
       </button>
     </div>
-    <div ref="treeBodyRef" class="nl-tree-body">
+    <div ref="treeBodyRef" class="nl-tree-body" @click="onTreeBodyClick">
       <div
         v-if="lineTop != null"
         class="tree-drop-line"
