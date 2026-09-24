@@ -48,11 +48,12 @@ pub fn reorder(conn: &Connection, ids: &[i64]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
+    let expected_parent = get(conn, ids[0])?.parent_id;
     for &id in ids {
         let f = get(conn, id)?;
-        if f.parent_id.is_some() {
+        if f.parent_id != expected_parent {
             return Err(rusqlite::Error::InvalidParameterName(
-                "INVALID_ARGUMENT: 本版本仅支持根级文件夹排序".into(),
+                "INVALID_ARGUMENT: 只能重排同一父级下的文件夹".into(),
             ));
         }
     }
@@ -121,11 +122,12 @@ pub fn move_folder(
     id: i64,
     new_parent_id: Option<i64>,
 ) -> Result<NoteFolder> {
-    let _folder = conn.query_row(
+    let folder = conn.query_row(
         "SELECT id, parent_id, name, sort_order, created_at, updated_at FROM note_folders WHERE id = ?1",
         params![id],
         row_to_folder_base,
     )?;
+    let current_parent = folder.parent_id;
 
     if new_parent_id == Some(id) {
         return Err(rusqlite::Error::InvalidParameterName(
@@ -166,9 +168,14 @@ pub fn move_folder(
         )));
     }
 
+    let new_sort = if new_parent_id != current_parent {
+        next_sibling_sort(conn, new_parent_id)?
+    } else {
+        folder.sort_order
+    };
     let affected = conn.execute(
-        "UPDATE note_folders SET parent_id = ?1, updated_at = ?2 WHERE id = ?3",
-        params![new_parent_id, now(), id],
+        "UPDATE note_folders SET parent_id = ?1, sort_order = ?2, updated_at = ?3 WHERE id = ?4",
+        params![new_parent_id, new_sort, now(), id],
     )?;
     if affected == 0 {
         return Err(rusqlite::Error::InvalidParameterName(format!(
@@ -393,12 +400,40 @@ mod tests {
     }
 
     #[test]
-    fn reorder_rejects_non_root_mix() {
+    fn reorder_nested_siblings() {
         let conn = init_in_memory().unwrap();
         let root = create(&conn, None, "R", None).unwrap();
-        let child = create(&conn, Some(root.id), "C", None).unwrap();
-        let err = reorder(&conn, &[root.id, child.id]).unwrap_err();
-        assert!(err.to_string().contains("INVALID") || err.to_string().contains("根"));
+        let a = create(&conn, Some(root.id), "A", None).unwrap();
+        let b = create(&conn, Some(root.id), "B", None).unwrap();
+        reorder(&conn, &[b.id, a.id]).unwrap();
+        assert_eq!(get(&conn, b.id).unwrap().sort_order, 1);
+        assert_eq!(get(&conn, a.id).unwrap().sort_order, 2);
+    }
+
+    #[test]
+    fn reorder_rejects_mixed_parents() {
+        let conn = init_in_memory().unwrap();
+        let r1 = create(&conn, None, "R1", None).unwrap();
+        let r2 = create(&conn, None, "R2", None).unwrap();
+        let c = create(&conn, Some(r1.id), "C", None).unwrap();
+        let err = reorder(&conn, &[r2.id, c.id]).unwrap_err();
+        assert!(err.to_string().contains("INVALID") || err.to_string().contains("父"));
+    }
+
+    #[test]
+    fn move_folder_appends_sort_under_new_parent() {
+        let conn = init_in_memory().unwrap();
+        let b = create(&conn, None, "B", None).unwrap();
+        let _x = create(&conn, Some(b.id), "X", None).unwrap();
+        let a = create(&conn, None, "A", None).unwrap();
+        move_folder(&conn, a.id, Some(b.id)).unwrap();
+        let kids = list(&conn)
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.parent_id == Some(b.id))
+            .collect::<Vec<_>>();
+        assert_eq!(kids.len(), 2);
+        assert_eq!(get(&conn, a.id).unwrap().sort_order, 2);
     }
 
     #[test]
