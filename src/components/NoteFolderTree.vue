@@ -12,7 +12,14 @@ import {
 import type { Note, NoteFolder } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { useFolderChildren } from '../composables/useNoteFolders'
-import { parseTimestamp } from '../utils/time'
+import {
+  folderZone,
+  noteAimFromFolderGap,
+  noteZone,
+  sameIdOrder,
+  spliceForGap,
+  type DropAim,
+} from '../utils/noteTreeHit'
 import AppSelect, { type AppSelectOption } from './AppSelect.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
@@ -58,7 +65,7 @@ type TreeRow =
 function notesInFolder(folderId: number | null): Note[] {
   return props.notes
     .filter((n) => (n.folder_id ?? null) === folderId)
-    .sort((a, b) => parseTimestamp(b.updated_at) - parseTimestamp(a.updated_at))
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.id - b.id)
 }
 
 function folderHasChildren(folderId: number): boolean {
@@ -179,8 +186,9 @@ function bumpSort(delta: number) {
 
 function onSortStepPointer(e: MouseEvent) {
   const el = e.currentTarget as HTMLElement
-  const mid = el.getBoundingClientRect().height / 2
-  bumpSort(e.offsetY < mid ? -1 : 1)
+  const rect = el.getBoundingClientRect()
+  const y = e.clientY - rect.top
+  bumpSort(y < rect.height / 2 ? -1 : 1)
 }
 
 function onFolderPlusClick() {
@@ -240,26 +248,351 @@ function onFolderDblClick(folder: NoteFolder, e: MouseEvent) {
   startRename(folder)
 }
 
-// ---- Pointer reorder (root folders only) ----
-const dragId = ref<number | null>(null)
+// ---- Pointer DnD：任意深度文件夹 + 笔记（纳入 / 同级重排）----
+const dragFolderId = ref<number | null>(null)
+const dragNoteId = ref<number | null>(null)
 const lineTop = ref<number | null>(null)
+const dropTargetId = ref<number | null>(null)
 /** 拖拽松手后吞掉随后的 click，避免误切展开态 */
 let suppressFolderClick = false
 
-let dragState: {
+type DragKind = 'folder' | 'note'
+type DragLive = {
+  kind: DragKind
   id: number
-  fromIndex: number
-  insert: number | null
-} | null = null
-
-function rootFolderEls(): HTMLElement[] {
-  const body = treeBodyRef.value
-  if (!body) return []
-  return Array.from(body.querySelectorAll<HTMLElement>('[data-root-folder]'))
+  /** 拖文件夹时的源 parent；拖笔记时的源 folder_id */
+  sourceParent: number | null
+  aim: DropAim | null
 }
 
-function onRootFolderPointerDown(folder: NoteFolder, e: PointerEvent) {
-  if (e.button !== 0 || folder.parent_id != null || editing.value) return
+let dragLive: DragLive | null = null
+let hoverExpandTimer: ReturnType<typeof setTimeout> | null = null
+let hoverExpandTarget: number | null = null
+let dragCancelBound = false
+
+function clearHoverExpand() {
+  if (hoverExpandTimer != null) {
+    clearTimeout(hoverExpandTimer)
+    hoverExpandTimer = null
+  }
+  hoverExpandTarget = null
+}
+
+function scheduleHoverExpand(folderId: number) {
+  if (expanded.value.has(folderId)) return
+  if (hoverExpandTarget === folderId) return
+  clearHoverExpand()
+  hoverExpandTarget = folderId
+  hoverExpandTimer = setTimeout(() => {
+    hoverExpandTimer = null
+    if (!expanded.value.has(folderId)) {
+      const next = new Set(expanded.value)
+      next.add(folderId)
+      expanded.value = next
+    }
+  }, 400)
+}
+
+function clearDragChrome() {
+  clearHoverExpand()
+  document.body.classList.remove('note-folder-dragging')
+  dragFolderId.value = null
+  dragNoteId.value = null
+  lineTop.value = null
+  dropTargetId.value = null
+  dragLive = null
+  if (dragCancelBound) {
+    window.removeEventListener('keydown', onDragKeydown)
+    window.removeEventListener('blur', onDragWindowBlur)
+    dragCancelBound = false
+  }
+}
+
+function cancelDrag() {
+  if (!dragLive) return
+  suppressFolderClick = true
+  clearDragChrome()
+}
+
+function onDragKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    cancelDrag()
+  }
+}
+
+function onDragWindowBlur() {
+  cancelDrag()
+}
+
+function bindDragCancel() {
+  if (dragCancelBound) return
+  dragCancelBound = true
+  window.addEventListener('keydown', onDragKeydown)
+  window.addEventListener('blur', onDragWindowBlur)
+}
+
+function folderById(id: number): NoteFolder | undefined {
+  return store.state.folders.find((f) => f.id === id)
+}
+
+function noteById(id: number): Note | undefined {
+  return props.notes.find((n) => n.id === id)
+}
+
+function siblingFolderIds(parentId: number | null): number[] {
+  return (childrenOf.value.get(parentId) ?? []).map((f) => f.id)
+}
+
+function siblingNoteIds(folderId: number | null): number[] {
+  return notesInFolder(folderId).map((n) => n.id)
+}
+
+function aimAtPoint(clientX: number, clientY: number): { aim: DropAim; edgeY: number | null } | null {
+  const body = treeBodyRef.value
+  if (!body) return null
+  const hit = document.elementFromPoint(clientX, clientY)
+  if (!hit || !body.contains(hit)) return null
+  const folderEl = (hit as HTMLElement).closest?.('[data-tree-folder]') as HTMLElement | null
+  const noteEl = folderEl
+    ? null
+    : ((hit as HTMLElement).closest?.('[data-tree-note]') as HTMLElement | null)
+
+  if (folderEl) {
+    const id = Number(folderEl.dataset.treeFolder)
+    if (!Number.isFinite(id)) return null
+    const folder = folderById(id)
+    if (!folder) return null
+    const rect = folderEl.getBoundingClientRect()
+    const zone = folderZone(clientY, rect.top, rect.height)
+    if (zone === 'nest') {
+      return { aim: { kind: 'nest', folderId: id }, edgeY: null }
+    }
+    const sibs = siblingFolderIds(folder.parent_id)
+    const idx = sibs.indexOf(id)
+    if (zone === 'above') {
+      return {
+        aim: {
+          kind: 'folder-gap',
+          parentId: folder.parent_id,
+          beforeId: idx > 0 ? sibs[idx - 1]! : null,
+          afterId: id,
+        },
+        edgeY: rect.top,
+      }
+    }
+    return {
+      aim: {
+        kind: 'folder-gap',
+        parentId: folder.parent_id,
+        beforeId: id,
+        afterId: idx >= 0 && idx < sibs.length - 1 ? sibs[idx + 1]! : null,
+      },
+      edgeY: rect.bottom,
+    }
+  }
+
+  if (noteEl) {
+    const id = Number(noteEl.dataset.treeNote)
+    if (!Number.isFinite(id)) return null
+    const note = noteById(id)
+    if (!note) return null
+    const folderId = note.folder_id ?? null
+    const rect = noteEl.getBoundingClientRect()
+    const zone = noteZone(clientY, rect.top, rect.height)
+    const sibs = siblingNoteIds(folderId)
+    const idx = sibs.indexOf(id)
+    if (zone === 'above') {
+      return {
+        aim: {
+          kind: 'note-gap',
+          folderId,
+          beforeId: idx > 0 ? sibs[idx - 1]! : null,
+          afterId: id,
+        },
+        edgeY: rect.top,
+      }
+    }
+    return {
+      aim: {
+        kind: 'note-gap',
+        folderId,
+        beforeId: id,
+        afterId: idx >= 0 && idx < sibs.length - 1 ? sibs[idx + 1]! : null,
+      },
+      edgeY: rect.bottom,
+    }
+  }
+
+  return null
+}
+
+function resolveAimForDrag(raw: DropAim): DropAim {
+  const live = dragLive
+  if (!live) return raw
+
+  // 拖笔记落在文件夹缝 → 纳入缝上方那一夹（笔记序末尾），不在夹缝插笔记行
+  if (live.kind === 'note' && raw.kind === 'folder-gap') {
+    return noteAimFromFolderGap(raw.beforeId) ?? raw
+  }
+
+  // 拖文件夹落在笔记缝 → 视为该笔记所在父级下文件夹段末尾的同级缝
+  if (live.kind === 'folder' && raw.kind === 'note-gap') {
+    const parentId = raw.folderId
+    const folders = siblingFolderIds(parentId)
+    const last = folders.length ? folders[folders.length - 1]! : null
+    return {
+      kind: 'folder-gap',
+      parentId,
+      beforeId: last,
+      afterId: null,
+    }
+  }
+
+  return raw
+}
+
+function updateDragAim(clientX: number, clientY: number) {
+  const live = dragLive
+  const body = treeBodyRef.value
+  if (!live || !body) return
+
+  const hit = aimAtPoint(clientX, clientY)
+  if (!hit) {
+    live.aim = null
+    lineTop.value = null
+    dropTargetId.value = null
+    clearHoverExpand()
+    return
+  }
+
+  const aim = resolveAimForDrag(hit.aim)
+
+  // 笔记落在「最前夹缝」无上方夹可纳入 → 无合法目标
+  if (live.kind === 'note' && aim.kind === 'folder-gap') {
+    live.aim = null
+    lineTop.value = null
+    dropTargetId.value = null
+    clearHoverExpand()
+    return
+  }
+
+  live.aim = aim
+
+  if (aim.kind === 'nest') {
+    const illegal =
+      live.kind === 'folder' && isIllegalFolderNest(live.id, aim.folderId)
+    dropTargetId.value = illegal ? null : aim.folderId
+    lineTop.value = null
+    if (illegal) clearHoverExpand()
+    else scheduleHoverExpand(aim.folderId)
+    return
+  }
+
+  dropTargetId.value = null
+  clearHoverExpand()
+  if (hit.edgeY != null) {
+    const bodyRect = body.getBoundingClientRect()
+    lineTop.value = hit.edgeY - bodyRect.top + body.scrollTop
+  } else {
+    lineTop.value = null
+  }
+}
+
+function isIllegalFolderNest(dragId: number, targetId: number): boolean {
+  if (dragId === targetId) return true
+  return descendantIds(dragId).has(targetId)
+}
+
+async function applyFolderDrop(live: DragLive, aim: DropAim) {
+  if (aim.kind === 'nest') {
+    if (isIllegalFolderNest(live.id, aim.folderId)) {
+      showToast('不能移入自身或子文件夹')
+      return
+    }
+    const cur = folderById(live.id)
+    if (cur && (cur.parent_id ?? null) === aim.folderId) {
+      const ids = [...siblingFolderIds(aim.folderId).filter((id) => id !== live.id), live.id]
+      if (!sameIdOrder(siblingFolderIds(aim.folderId), ids)) {
+        await store.reorderFolders(ids)
+      }
+      return
+    }
+    await store.moveFolder(live.id, aim.folderId)
+    return
+  }
+
+  if (aim.kind !== 'folder-gap') return
+
+  if (aim.parentId != null && isIllegalFolderNest(live.id, aim.parentId)) {
+    showToast('不能移入自身或子文件夹')
+    return
+  }
+
+  const parentId = aim.parentId
+  if (live.sourceParent !== parentId) {
+    await store.moveFolder(live.id, parentId)
+  }
+
+  let siblings = siblingFolderIds(parentId)
+  if (!siblings.includes(live.id)) siblings = [...siblings, live.id]
+  const next = spliceForGap(siblings, live.id, aim.beforeId, aim.afterId)
+  if (sameIdOrder(siblings, next)) return
+  await store.reorderFolders(next)
+}
+
+async function applyNoteDrop(live: DragLive, aim: DropAim) {
+  if (aim.kind === 'nest') {
+    const cur = noteById(live.id)
+    if (cur && (cur.folder_id ?? null) === aim.folderId) {
+      const ids = [...siblingNoteIds(aim.folderId).filter((id) => id !== live.id), live.id]
+      if (!sameIdOrder(siblingNoteIds(aim.folderId), ids)) {
+        await store.reorderNotes(ids)
+      }
+      return
+    }
+    await store.setNoteFolder(live.id, aim.folderId)
+    return
+  }
+
+  // resolveAim 通常已把 folder-gap 转成 nest；缝在最前无上方夹 → 忽略
+  if (aim.kind === 'folder-gap') return
+
+  if (aim.kind !== 'note-gap') return
+
+  const folderId = aim.folderId
+  if (live.sourceParent !== folderId) {
+    await store.setNoteFolder(live.id, folderId)
+  }
+
+  let siblings = siblingNoteIds(folderId)
+  if (!siblings.includes(live.id)) siblings = [...siblings, live.id]
+  const next = spliceForGap(siblings, live.id, aim.beforeId, aim.afterId)
+  if (sameIdOrder(siblings, next)) return
+  await store.reorderNotes(next)
+}
+
+async function finishDrag() {
+  const live = dragLive
+  const aim = live?.aim ?? null
+  suppressFolderClick = true
+  clearDragChrome()
+  if (!live || !aim) return
+  try {
+    if (live.kind === 'folder') await applyFolderDrop(live, aim)
+    else await applyNoteDrop(live, aim)
+  } catch (err) {
+    showToast(String(err))
+    try {
+      await Promise.all([store.refreshFolders(), store.refreshNotes()])
+    } catch {
+      /* refresh 兜底失败忽略 */
+    }
+  }
+}
+
+function onTreeRowPointerDown(kind: DragKind, id: number, e: PointerEvent) {
+  if (e.button !== 0 || editing.value) return
   const target = e.target as HTMLElement | null
   if (target?.closest('button, input, .tree-chevron, [data-no-drag]')) return
 
@@ -281,13 +614,24 @@ function onRootFolderPointerDown(folder: NoteFolder, e: PointerEvent) {
     } catch {
       /* ignore */
     }
-    const roots = childrenOf.value.get(null) ?? []
-    const fromIndex = roots.findIndex((f) => f.id === folder.id)
-    if (fromIndex < 0) return false
-    dragState = { id: folder.id, fromIndex, insert: null }
-    dragId.value = folder.id
+    let sourceParent: number | null = null
+    if (kind === 'folder') {
+      const f = folderById(id)
+      if (!f) return false
+      sourceParent = f.parent_id
+      dragFolderId.value = id
+      dragNoteId.value = null
+    } else {
+      const n = noteById(id)
+      if (!n) return false
+      sourceParent = n.folder_id ?? null
+      dragNoteId.value = id
+      dragFolderId.value = null
+    }
+    dragLive = { kind, id, sourceParent, aim: null }
     document.body.classList.add('note-folder-dragging')
     document.getSelection()?.removeAllRanges()
+    bindDragCancel()
     return true
   }
 
@@ -301,7 +645,7 @@ function onRootFolderPointerDown(folder: NoteFolder, e: PointerEvent) {
       }
       active = true
     }
-    updateDragLine(ev.clientY)
+    updateDragAim(ev.clientX, ev.clientY)
   }
 
   function onUp() {
@@ -316,52 +660,12 @@ function onRootFolderPointerDown(folder: NoteFolder, e: PointerEvent) {
   }
 }
 
-function updateDragLine(clientY: number) {
-  const ds = dragState
-  const body = treeBodyRef.value
-  if (!ds || !body) return
-  const rows = rootFolderEls()
-  if (!rows.length) {
-    ds.insert = null
-    lineTop.value = null
-    return
-  }
-  const bodyRect = body.getBoundingClientRect()
-  let insert = rows.length
-  let edgeY = rows[rows.length - 1]!.getBoundingClientRect().bottom
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i]!.getBoundingClientRect()
-    if (clientY < r.top + r.height / 2) {
-      edgeY = r.top
-      insert = i
-      break
-    }
-    edgeY = r.bottom
-    insert = i + 1
-  }
-  ds.insert = insert
-  lineTop.value = edgeY - bodyRect.top + body.scrollTop
+function onFolderPointerDown(folder: NoteFolder, e: PointerEvent) {
+  onTreeRowPointerDown('folder', folder.id, e)
 }
 
-async function finishDrag() {
-  const ds = dragState
-  suppressFolderClick = true
-  document.body.classList.remove('note-folder-dragging')
-  dragId.value = null
-  dragState = null
-  lineTop.value = null
-  if (!ds || ds.insert == null || ds.fromIndex < 0) return
-  const roots = childrenOf.value.get(null) ?? []
-  const ids = roots.map((f) => f.id)
-  const final = ds.insert > ds.fromIndex ? ds.insert - 1 : ds.insert
-  if (final === ds.fromIndex) return
-  const without = ids.filter((_, i) => i !== ds.fromIndex)
-  without.splice(final, 0, ds.id)
-  try {
-    await store.reorderFolders(without)
-  } catch (err) {
-    showToast(String(err))
-  }
+function onNotePointerDown(note: Note, e: PointerEvent) {
+  onTreeRowPointerDown('note', note.id, e)
 }
 
 // ---- Context menus ----
@@ -602,9 +906,10 @@ defineExpose({ flatFolderOptions })
           class="tree-row"
           :class="{
             active: isFolderSelected(row.folder.id),
-            dragging: dragId === row.folder.id,
+            dragging: dragFolderId === row.folder.id,
+            'drop-target': dropTargetId === row.folder.id,
           }"
-          :data-root-folder="row.depth === 0 ? String(row.folder.id) : undefined"
+          :data-tree-folder="String(row.folder.id)"
           :style="{ paddingLeft: `${8 + row.depth * 12}px` }"
           role="button"
           tabindex="0"
@@ -612,7 +917,7 @@ defineExpose({ flatFolderOptions })
           @dblclick="onFolderDblClick(row.folder, $event)"
           @keydown.enter="onFolderClick(row.folder)"
           @contextmenu="onFolderContext($event, row.folder)"
-          @pointerdown="onRootFolderPointerDown(row.folder, $event)"
+          @pointerdown="onFolderPointerDown(row.folder, $event)"
         >
           <button
             v-if="row.hasChildren"
@@ -659,13 +964,18 @@ defineExpose({ flatFolderOptions })
         <div
           v-else-if="row.kind === 'note'"
           class="tree-row tree-row--note"
-          :class="{ active: row.note.id === activeNoteId }"
+          :class="{
+            active: row.note.id === activeNoteId,
+            dragging: dragNoteId === row.note.id,
+          }"
+          :data-tree-note="String(row.note.id)"
           :style="{ paddingLeft: `${8 + row.depth * 12}px` }"
           role="button"
           tabindex="0"
           @click="onNoteClick(row.note)"
           @keydown.enter="onNoteClick(row.note)"
           @contextmenu="onNoteContext($event, row.note)"
+          @pointerdown="onNotePointerDown(row.note, $event)"
         >
           <span class="tree-chevron-spacer" />
           <StickyNote class="tree-icon" :size="13" :stroke-width="1.8" />
@@ -788,8 +1098,18 @@ defineExpose({ flatFolderOptions })
   color: var(--brand-500);
   font-weight: 600;
 }
+/* 拖中行半透明；指针穿透整行（含子孙），否则 elementFromPoint 永远命中自身 */
 .tree-row.dragging {
   opacity: 0.4;
+  pointer-events: none;
+}
+.tree-row.dragging * {
+  pointer-events: none;
+}
+.tree-row.drop-target {
+  background: color-mix(in srgb, var(--brand-500) 18%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--brand-500) 55%, transparent);
+  outline-offset: -1px;
 }
 .tree-row--note {
   font-weight: 400;
