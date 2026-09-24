@@ -71,6 +71,12 @@ pub fn update(conn: &Connection, id: i64, title: &str, content: &str) -> Result<
 }
 
 pub fn set_folder(conn: &Connection, note_id: i64, folder_id: Option<i64>) -> Result<Note> {
+    let current = get(conn, note_id)?;
+    // 同夹不再改 sort（避免误甩到末尾留下空洞）
+    if current.folder_id == folder_id {
+        return Ok(current);
+    }
+    let old_folder = current.folder_id;
     let sort = next_note_sort(conn, folder_id)?;
     let affected = conn.execute(
         "UPDATE notes SET folder_id = ?1, sort_order = ?2, updated_at = ?3 WHERE id = ?4",
@@ -81,6 +87,7 @@ pub fn set_folder(conn: &Connection, note_id: i64, folder_id: Option<i64>) -> Re
             "NOT_FOUND: 笔记 {note_id} 不存在"
         )));
     }
+    densify_note_siblings(conn, old_folder)?;
     get(conn, note_id)
 }
 
@@ -186,6 +193,33 @@ fn next_note_sort(conn: &Connection, folder_id: Option<i64>) -> Result<i64> {
         )?,
     };
     Ok(max.unwrap_or(0) + 1)
+}
+
+/// 同夹笔记按当前 sort_order/id 重写为 1…n（移出后消空洞）
+fn densify_note_siblings(conn: &Connection, folder_id: Option<i64>) -> Result<()> {
+    let sql = match folder_id {
+        Some(_) => {
+            "SELECT id FROM notes WHERE folder_id = ?1 ORDER BY sort_order ASC, id ASC"
+        }
+        None => "SELECT id FROM notes WHERE folder_id IS NULL ORDER BY sort_order ASC, id ASC",
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let ids: Vec<i64> = match folder_id {
+        Some(fid) => stmt
+            .query_map(params![fid], |r| r.get(0))?
+            .collect::<Result<Vec<_>>>()?,
+        None => stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>>>()?,
+    };
+    let ts = now();
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE notes SET sort_order = ?1, updated_at = ?2 WHERE id = ?3",
+            params![(i as i64) + 1, ts, id],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn row_to_note(row: &rusqlite::Row) -> Result<Note> {
@@ -316,5 +350,30 @@ mod tests {
         let b = create_with_folder(&conn, "b", Some(f2.id)).unwrap();
         let err = reorder(&conn, &[a.id, b.id]).unwrap_err();
         assert!(err.to_string().contains("INVALID") || err.to_string().contains("不同"));
+    }
+
+    #[test]
+    fn set_folder_same_folder_keeps_sort() {
+        let conn = init_in_memory().unwrap();
+        let f = crate::repo::folder::create(&conn, None, "W", None).unwrap();
+        let a = create_with_folder(&conn, "a", Some(f.id)).unwrap();
+        let b = create_with_folder(&conn, "b", Some(f.id)).unwrap();
+        assert_eq!(a.sort_order, 1);
+        let again = set_folder(&conn, a.id, Some(f.id)).unwrap();
+        assert_eq!(again.sort_order, 1);
+        assert_eq!(get(&conn, b.id).unwrap().sort_order, 2);
+    }
+
+    #[test]
+    fn set_folder_densifies_old_sibling_sort() {
+        let conn = init_in_memory().unwrap();
+        let f1 = crate::repo::folder::create(&conn, None, "A", None).unwrap();
+        let f2 = crate::repo::folder::create(&conn, None, "B", None).unwrap();
+        let a = create_with_folder(&conn, "a", Some(f1.id)).unwrap();
+        let b = create_with_folder(&conn, "b", Some(f1.id)).unwrap();
+        let c = create_with_folder(&conn, "c", Some(f1.id)).unwrap();
+        set_folder(&conn, a.id, Some(f2.id)).unwrap();
+        assert_eq!(get(&conn, b.id).unwrap().sort_order, 1);
+        assert_eq!(get(&conn, c.id).unwrap().sort_order, 2);
     }
 }

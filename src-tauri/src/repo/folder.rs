@@ -182,6 +182,9 @@ pub fn move_folder(
             "NOT_FOUND: 文件夹 {id} 不存在"
         )));
     }
+    if new_parent_id != current_parent {
+        densify_folder_siblings(conn, current_parent)?;
+    }
     get(conn, id)
 }
 
@@ -282,6 +285,35 @@ fn next_sibling_sort(conn: &Connection, parent_id: Option<i64>) -> Result<i64> {
         )?,
     };
     Ok(max.unwrap_or(0) + 1)
+}
+
+/// 同父文件夹按当前 sort_order/id 重写为 1…n（移出后消空洞）
+fn densify_folder_siblings(conn: &Connection, parent_id: Option<i64>) -> Result<()> {
+    let sql = match parent_id {
+        Some(_) => {
+            "SELECT id FROM note_folders WHERE parent_id = ?1 ORDER BY sort_order ASC, id ASC"
+        }
+        None => {
+            "SELECT id FROM note_folders WHERE parent_id IS NULL ORDER BY sort_order ASC, id ASC"
+        }
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let ids: Vec<i64> = match parent_id {
+        Some(pid) => stmt
+            .query_map(params![pid], |r| r.get(0))?
+            .collect::<Result<Vec<_>>>()?,
+        None => stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>>>()?,
+    };
+    let ts = now();
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE note_folders SET sort_order = ?1, updated_at = ?2 WHERE id = ?3",
+            params![(i as i64) + 1, ts, id],
+        )?;
+    }
+    Ok(())
 }
 
 fn find_or_create_one(conn: &Connection, parent_id: Option<i64>, name: &str) -> Result<i64> {
@@ -472,5 +504,20 @@ mod tests {
         create(&conn, None, "工作", None).unwrap();
         let err = create(&conn, None, "工作", None).unwrap_err();
         assert!(err.to_string().contains("同名"));
+    }
+
+    #[test]
+    fn move_folder_densifies_old_parent_siblings() {
+        let conn = init_in_memory().unwrap();
+        let a = create(&conn, None, "A", None).unwrap();
+        let b = create(&conn, None, "B", None).unwrap();
+        let c = create(&conn, None, "C", None).unwrap();
+        assert_eq!(a.sort_order, 1);
+        assert_eq!(b.sort_order, 2);
+        assert_eq!(c.sort_order, 3);
+        let dest = create(&conn, None, "Dest", None).unwrap();
+        move_folder(&conn, a.id, Some(dest.id)).unwrap();
+        assert_eq!(get(&conn, b.id).unwrap().sort_order, 1);
+        assert_eq!(get(&conn, c.id).unwrap().sort_order, 2);
     }
 }

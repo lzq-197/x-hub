@@ -206,9 +206,9 @@ function onTreeBodyClick(e: MouseEvent) {
   emit('select-folder', null)
 }
 
-async function applyRootSort(folderId: number, desiredSort: number) {
-  const roots = [...(childrenOf.value.get(null) ?? [])]
-  const others = roots.filter((f) => f.id !== folderId).map((f) => f.id)
+async function applySiblingSort(parentId: number | null, folderId: number, desiredSort: number) {
+  const siblings = [...(childrenOf.value.get(parentId) ?? [])]
+  const others = siblings.filter((f) => f.id !== folderId).map((f) => f.id)
   const pos = Math.max(0, Math.min(others.length, Math.floor(desiredSort) - 1))
   others.splice(pos, 0, folderId)
   await store.reorderFolders(others)
@@ -225,17 +225,15 @@ async function commitEdit() {
   try {
     if (state.mode === 'create') {
       const folder = await store.createFolder(state.parentId, name, editSort.value)
-      if (state.parentId == null) {
-        await applyRootSort(folder.id, editSort.value)
-      }
+      await applySiblingSort(state.parentId, folder.id, editSort.value)
       emit('select-folder', folder.id)
     } else {
       const folder = state.folder
       if (name !== folder.name) {
         await store.renameFolder(folder.id, name)
       }
-      if (folder.parent_id == null && editSort.value !== folder.sort_order) {
-        await applyRootSort(folder.id, editSort.value)
+      if (editSort.value !== folder.sort_order) {
+        await applySiblingSort(folder.parent_id, folder.id, editSort.value)
       }
     }
     cancelEdit()
@@ -312,7 +310,7 @@ function clearDragChrome() {
 
 function cancelDrag() {
   if (!dragLive) return
-  suppressFolderClick = true
+  // 取消拖拽不吞下一次 click（仅真正松手完成拖时 finishDrag 才 suppress）
   clearDragChrome()
 }
 
@@ -460,6 +458,34 @@ function resolveAimForDrag(raw: DropAim): DropAim {
   return raw
 }
 
+function edgeYForAim(aim: DropAim): number | null {
+  const body = treeBodyRef.value
+  if (!body) return null
+  if (aim.kind === 'folder-gap') {
+    if (aim.afterId != null) {
+      const el = body.querySelector(`[data-tree-folder="${aim.afterId}"]`) as HTMLElement | null
+      return el?.getBoundingClientRect().top ?? null
+    }
+    if (aim.beforeId != null) {
+      const el = body.querySelector(`[data-tree-folder="${aim.beforeId}"]`) as HTMLElement | null
+      return el?.getBoundingClientRect().bottom ?? null
+    }
+    return null
+  }
+  if (aim.kind === 'note-gap') {
+    if (aim.afterId != null) {
+      const el = body.querySelector(`[data-tree-note="${aim.afterId}"]`) as HTMLElement | null
+      return el?.getBoundingClientRect().top ?? null
+    }
+    if (aim.beforeId != null) {
+      const el = body.querySelector(`[data-tree-note="${aim.beforeId}"]`) as HTMLElement | null
+      return el?.getBoundingClientRect().bottom ?? null
+    }
+    return null
+  }
+  return null
+}
+
 function updateDragAim(clientX: number, clientY: number) {
   const live = dragLive
   const body = treeBodyRef.value
@@ -499,9 +525,11 @@ function updateDragAim(clientX: number, clientY: number) {
 
   dropTargetId.value = null
   clearHoverExpand()
-  if (hit.edgeY != null) {
+  // 重映射后的 aim（如夹→笔记缝）用目标缝的边，不用原始命中行的 edgeY
+  const edgeY = edgeYForAim(aim) ?? hit.edgeY
+  if (edgeY != null) {
     const bodyRect = body.getBoundingClientRect()
-    lineTop.value = hit.edgeY - bodyRect.top + body.scrollTop
+    lineTop.value = edgeY - bodyRect.top + body.scrollTop
   } else {
     lineTop.value = null
   }
@@ -892,7 +920,7 @@ defineExpose({ flatFolderOptions })
             @keydown.enter.prevent="commitEdit"
             @keydown.escape.prevent="cancelEdit"
           />
-          <div v-if="row.folder.parent_id == null" class="sort-box" title="排序">
+          <div class="sort-box" title="排序">
             <input v-model.number="editSort" type="number" min="1" />
             <button
               type="button"
@@ -964,6 +992,18 @@ defineExpose({ flatFolderOptions })
             @keydown.enter.prevent="commitEdit"
             @keydown.escape.prevent="cancelEdit"
           />
+          <div class="sort-box" title="排序">
+            <input v-model.number="editSort" type="number" min="1" />
+            <button
+              type="button"
+              class="sort-step"
+              aria-label="调整排序"
+              @mousedown.prevent="onSortStepPointer"
+            >
+              <span>▲</span>
+              <span>▼</span>
+            </button>
+          </div>
           <button type="button" class="btn-ok" title="保存" @click="commitEdit">
             <Check :size="14" :stroke-width="2.5" />
           </button>

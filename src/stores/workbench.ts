@@ -365,7 +365,13 @@ export function useStore() {
   /** 剪贴板浮层等外部保存速记后，主窗口刷新笔记列表（仅拉元信息，轻量） */
   async function refreshNotes() {
     if (!isTauri()) return
-    state.notes = await tauriApi.listNotes()
+    // list_notes → list_meta：content 恒为空。合并本地已有正文，避免拖拽重排等刷新后切笔记空白/误存空文。
+    const meta = await tauriApi.listNotes()
+    const prevContent = new Map(state.notes.map((n) => [n.id, n.content]))
+    state.notes = meta.map((n) => ({
+      ...n,
+      content: prevContent.get(n.id) || n.content,
+    }))
   }
 
   // ---- 速记文件夹 / Markdown 导入 ----
