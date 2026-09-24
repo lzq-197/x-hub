@@ -499,6 +499,13 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !note_cols.iter().any(|c| c == "source_path") {
         conn.execute("ALTER TABLE notes ADD COLUMN source_path TEXT", [])?;
     }
+    if !note_cols.iter().any(|c| c == "sort_order") {
+        conn.execute(
+            "ALTER TABLE notes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        backfill_note_sort_orders(conn)?;
+    }
 
     // 导入键唯一（NULL 可多条）；同级文件夹名唯一（根级 parent_id 用 -1 哨兵）
     conn.execute(
@@ -510,6 +517,38 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    Ok(())
+}
+
+/// 存量笔记按 folder_id 分组回填 sort_order（updated_at DESC, id DESC → 1..n）。
+fn backfill_note_sort_orders(conn: &Connection) -> Result<()> {
+    let folder_keys: Vec<i64> = conn
+        .prepare("SELECT DISTINCT IFNULL(folder_id, -1) FROM notes")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for key in folder_keys {
+        let ids: Vec<i64> = if key == -1 {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM notes WHERE folder_id IS NULL ORDER BY updated_at DESC, id DESC",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM notes WHERE folder_id = ?1 ORDER BY updated_at DESC, id DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![key], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        for (i, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE notes SET sort_order = ?1 WHERE id = ?2",
+                rusqlite::params![(i as i64) + 1, id],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -779,7 +818,7 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<String>>>()
             .unwrap();
-        for col in ["folder_id", "source_path"] {
+        for col in ["folder_id", "source_path", "sort_order"] {
             assert!(note_cols.iter().any(|c| c == col), "notes 缺列 {col}");
         }
 
@@ -810,6 +849,7 @@ mod tests {
         assert_eq!(note.title, "存量笔记");
         assert_eq!(note.folder_id, None);
         assert_eq!(note.source_path, None);
+        assert_eq!(note.sort_order, 1);
     }
 
     #[test]

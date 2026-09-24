@@ -32,6 +32,8 @@ pub struct Note {
     pub folder_id: Option<i64>,
     #[serde(default)]
     pub source_path: Option<String>,
+    #[serde(default)]
+    pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
 }
