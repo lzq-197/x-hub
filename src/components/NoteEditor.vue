@@ -324,6 +324,18 @@ function syncLocal() {
   dirty.value = false
 }
 
+watch(
+  () => props.note?.title,
+  (title) => {
+    if (title == null) return
+    if (title === localTitle.value) return
+    const active = document.activeElement
+    const titleInput = active instanceof HTMLInputElement && active.classList.contains('ed-title-input')
+    if (titleInput) return
+    localTitle.value = title
+  },
+)
+
 /** 立即落盘防抖中未保存的编辑（若存在），并取消挂起的定时器 */
 function flushPendingSave() {
   if (!saveTimer) return
