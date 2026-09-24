@@ -141,6 +141,7 @@ function onNoteClick(note: Note) {
 type EditState =
   | { mode: 'create'; parentId: number | null }
   | { mode: 'rename'; folder: NoteFolder }
+  | { mode: 'rename-note'; note: Note }
 
 const editing = ref<EditState | null>(null)
 const editName = ref('')
@@ -175,6 +176,25 @@ function startRename(folder: NoteFolder) {
   editName.value = folder.name
   editSort.value = folder.sort_order
   void focusEditInput()
+}
+
+function startRenameNote(note: Note) {
+  editing.value = { mode: 'rename-note', note }
+  editName.value = note.title
+  void focusEditInput()
+}
+
+function onNoteDblClick(note: Note, e: MouseEvent) {
+  e.preventDefault()
+  e.stopPropagation()
+  emit('select-note', note.id)
+  if (note.folder_id != null) emit('select-folder', note.folder_id)
+  else emit('select-folder', null)
+  startRenameNote(note)
+}
+
+function showRenameNoteEdit(noteId: number): boolean {
+  return editing.value?.mode === 'rename-note' && editing.value.note.id === noteId
 }
 
 function cancelEdit() {
@@ -215,13 +235,33 @@ async function applySiblingSort(parentId: number | null, folderId: number, desir
 }
 
 async function commitEdit() {
+  const state = editing.value
+  if (!state) return
+
+  if (state.mode === 'rename-note') {
+    const raw = editName.value.trim()
+    const name = raw || '无标题笔记'
+    if (name === state.note.title) {
+      cancelEdit()
+      return
+    }
+    try {
+      await store.renameNote(state.note.id, name)
+      cancelEdit()
+    } catch (err) {
+      const msg = String(err)
+      showToast(msg)
+      if (msg.includes('NOT_FOUND')) cancelEdit()
+      // else stay in edit mode
+    }
+    return
+  }
+
   const name = editName.value.trim()
   if (!name) {
     showToast('文件夹名称不能为空')
     return
   }
-  const state = editing.value
-  if (!state) return
   try {
     if (state.mode === 'create') {
       const folder = await store.createFolder(state.parentId, name, editSort.value)
@@ -733,6 +773,7 @@ function onNoteContext(e: MouseEvent, note: Note) {
   e.preventDefault()
   e.stopPropagation()
   const items: ContextMenuItem[] = [
+    { label: '重命名', onClick: () => startRenameNote(note) },
     {
       label: '移到顶级',
       onClick: () => void moveNoteToFolder(note.id, null),
@@ -1010,6 +1051,27 @@ defineExpose({ flatFolderOptions })
         </div>
 
         <div
+          v-else-if="row.kind === 'note' && showRenameNoteEdit(row.note.id)"
+          class="edit-row"
+          :style="{ paddingLeft: `${8 + row.depth * 12}px` }"
+          data-no-drag
+        >
+          <input
+            :ref="bindEditInput"
+            v-model="editName"
+            type="text"
+            class="edit-name"
+            maxlength="80"
+            placeholder="笔记标题"
+            @keydown.enter.prevent="commitEdit"
+            @keydown.escape.prevent="cancelEdit"
+          />
+          <button type="button" class="btn-ok" title="保存" @click="commitEdit">
+            <Check :size="14" :stroke-width="2.5" />
+          </button>
+        </div>
+
+        <div
           v-else-if="row.kind === 'note'"
           class="tree-row tree-row--note"
           :class="{
@@ -1021,6 +1083,7 @@ defineExpose({ flatFolderOptions })
           role="button"
           tabindex="0"
           @click="onNoteClick(row.note)"
+          @dblclick="onNoteDblClick(row.note, $event)"
           @keydown.enter="onNoteClick(row.note)"
           @contextmenu="onNoteContext($event, row.note)"
           @pointerdown="onNotePointerDown(row.note, $event)"
