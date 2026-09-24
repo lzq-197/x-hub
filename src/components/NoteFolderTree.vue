@@ -17,7 +17,9 @@ import {
   noteAimFromFolderGap,
   noteZone,
   sameIdOrder,
+  siblingNoteIdsInFolder,
   spliceForGap,
+  spliceNoteGapInFullSiblings,
   type DropAim,
 } from '../utils/noteTreeHit'
 import AppSelect, { type AppSelectOption } from './AppSelect.vue'
@@ -344,8 +346,14 @@ function siblingFolderIds(parentId: number | null): number[] {
   return (childrenOf.value.get(parentId) ?? []).map((f) => f.id)
 }
 
-function siblingNoteIds(folderId: number | null): number[] {
+/** 可见行（可被标签过滤）——仅用于命中缝的 before/after */
+function visibleSiblingNoteIds(folderId: number | null): number[] {
   return notesInFolder(folderId).map((n) => n.id)
+}
+
+/** 同夹全量兄弟——reorderNotes / 巢入末尾必须用这份，避免漏改未展示笔记的 sort_order */
+function siblingNoteIds(folderId: number | null): number[] {
+  return siblingNoteIdsInFolder(store.state.notes, folderId)
 }
 
 function aimAtPoint(clientX: number, clientY: number): { aim: DropAim; edgeY: number | null } | null {
@@ -400,7 +408,7 @@ function aimAtPoint(clientX: number, clientY: number): { aim: DropAim; edgeY: nu
     const folderId = note.folder_id ?? null
     const rect = noteEl.getBoundingClientRect()
     const zone = noteZone(clientY, rect.top, rect.height)
-    const sibs = siblingNoteIds(folderId)
+    const sibs = visibleSiblingNoteIds(folderId)
     const idx = sibs.indexOf(id)
     if (zone === 'above') {
       return {
@@ -567,7 +575,7 @@ async function applyNoteDrop(live: DragLive, aim: DropAim) {
 
   let siblings = siblingNoteIds(folderId)
   if (!siblings.includes(live.id)) siblings = [...siblings, live.id]
-  const next = spliceForGap(siblings, live.id, aim.beforeId, aim.afterId)
+  const next = spliceNoteGapInFullSiblings(siblings, live.id, aim.beforeId, aim.afterId)
   if (sameIdOrder(siblings, next)) return
   await store.reorderNotes(next)
 }

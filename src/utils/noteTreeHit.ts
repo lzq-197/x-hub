@@ -96,3 +96,37 @@ export function sameIdOrder(a: number[], b: number[]): boolean {
   }
   return true
 }
+
+/** 供按 folder_id 取兄弟笔记序（与树 sort_order→id 一致） */
+export type NoteFolderSortRow = {
+  id: number
+  folder_id?: number | null
+  sort_order?: number | null
+}
+
+/**
+ * 同一 folder_id 下的全部笔记 id（仅按夹过滤，不按标签）。
+ * reorderNotes 必须用这份完整兄弟表；标签过滤后的可见子集会漏改 sort_order。
+ */
+export function siblingNoteIdsInFolder(
+  notes: readonly NoteFolderSortRow[],
+  folderId: number | null,
+): number[] {
+  return notes
+    .filter((n) => (n.folder_id ?? null) === folderId)
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.id - b.id)
+    .map((n) => n.id)
+}
+
+/**
+ * 把「可见缝」上的 before/after 落到完整兄弟表里再 splice。
+ * 可见列表可为标签过滤子集；siblingIds 必须是同夹全量。
+ */
+export function spliceNoteGapInFullSiblings(
+  fullSiblingIds: number[],
+  draggedId: number,
+  beforeId: number | null,
+  afterId: number | null,
+): number[] {
+  return spliceForGap(fullSiblingIds, draggedId, beforeId, afterId)
+}
