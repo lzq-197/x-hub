@@ -365,6 +365,14 @@ pub fn reorder_note_folders(state: State<'_, DbState>, ids: Vec<i64>) -> Result<
 }
 
 #[tauri::command]
+pub fn reorder_notes(state: State<'_, DbState>, ids: Vec<i64>) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    note::reorder(&conn, &ids).map_err(err_str)?;
+    log::info!("笔记重排: {:?}", ids);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn delete_note_folder(
     state: State<'_, DbState>,
     id: i64,

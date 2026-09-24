@@ -410,6 +410,18 @@ export function useStore() {
     await refreshFolders()
   }
 
+  async function reorderNotes(ids: number[]) {
+    if (!isTauri()) {
+      ids.forEach((id, i) => {
+        const n = state.notes.find((x) => x.id === id)
+        if (n) n.sort_order = i + 1
+      })
+      return
+    }
+    await tauriApi.reorderNotes(ids)
+    await refreshNotes()
+  }
+
   async function resolveOrCreateRootFolder(name: string): Promise<number> {
     const trimmed = name.trim()
     if (!trimmed) throw new Error('文件夹名称不能为空')
@@ -1449,6 +1461,7 @@ export function useStore() {
     saveNote,
     removeNote,
     refreshNotes,
+    reorderNotes,
     refreshFolders,
     createFolder,
     reorderFolders,

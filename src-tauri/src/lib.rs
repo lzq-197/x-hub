@@ -523,6 +523,7 @@ pub fn run() {
             commands::rename_note_folder,
             commands::move_note_folder,
             commands::reorder_note_folders,
+            commands::reorder_notes,
             commands::delete_note_folder,
             commands::set_note_folder,
             commands::import_markdown,

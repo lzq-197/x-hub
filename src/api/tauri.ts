@@ -30,6 +30,8 @@ export interface Note {
   folder_id?: number | null
   /** Markdown 导入去重键（相对路径）；手写笔记为 null */
   source_path?: string | null
+  /** 同 folder_id 分组内手动排序位（1 起） */
+  sort_order?: number
   created_at: string
   updated_at: string
 }
@@ -890,6 +892,7 @@ export const tauriApi = {
   updateNote: (id: number, title: string, content: string) =>
     invoke<Note>('update_note', { id, title, content }),
   deleteNote: (id: number) => invoke<void>('delete_note', { id }),
+  reorderNotes: (ids: number[]) => invoke<void>('reorder_notes', { ids }),
   setNoteSourcePath: (noteId: number, sourcePath: string | null) =>
     invoke<Note>('set_note_source_path', { noteId, sourcePath }),
   listNotes: () => invoke<Note[]>('list_notes'),
