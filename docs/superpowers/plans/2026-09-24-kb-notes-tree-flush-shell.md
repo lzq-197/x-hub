@@ -34,7 +34,7 @@
 - Consumes: none
 - Produces: transparent, borderless `.nl-tree` keeping flex layout
 
-- [ ] **Step 1: Locate current rule**
+- [x] **Step 1: Locate current rule**
 
 In `NoteFolderTree.vue`, find:
 
@@ -51,7 +51,7 @@ In `NoteFolderTree.vue`, find:
 }
 ```
 
-- [ ] **Step 2: Apply flush styles**
+- [x] **Step 2: Apply flush styles**
 
 Replace with:
 
@@ -66,11 +66,11 @@ Replace with:
 }
 ```
 
-- [ ] **Step 3: Visual check**
+- [x] **Step 3: Visual check**
 
 Open 速记视图：左栏仅外层玻璃卡有描边；内层树无第二层底色/圆角框；「文件夹」+ FolderPlus 仍在；选中行高亮仍清晰。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```powershell
 git add src/components/NoteFolderTree.vue
