@@ -516,6 +516,7 @@ pub fn run() {
             commands::create_note,
             commands::set_note_source_path,
             commands::update_note,
+            commands::rename_note,
             commands::delete_note,
             commands::list_notes,
             commands::list_note_folders,

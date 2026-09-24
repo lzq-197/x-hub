@@ -70,6 +70,28 @@ pub fn update(conn: &Connection, id: i64, title: &str, content: &str) -> Result<
     get(conn, id)
 }
 
+/// 只改标题，不改 content（树内联重命名；避免 list_meta 空正文经 update 误存）。
+pub fn rename(conn: &Connection, id: i64, title: &str) -> Result<Note> {
+    let title = {
+        let t = title.trim();
+        if t.is_empty() {
+            "无标题笔记"
+        } else {
+            t
+        }
+    };
+    let affected = conn.execute(
+        "UPDATE notes SET title = ?1, updated_at = ?2 WHERE id = ?3",
+        params![title, now(), id],
+    )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 笔记 {id} 不存在"
+        )));
+    }
+    get(conn, id)
+}
+
 pub fn set_folder(conn: &Connection, note_id: i64, folder_id: Option<i64>) -> Result<Note> {
     let current = get(conn, note_id)?;
     // 同夹不再改 sort（避免误甩到末尾留下空洞）
@@ -267,6 +289,38 @@ mod tests {
         let updated = update(&conn, n.id, "新标题", "这是内容").unwrap();
         assert_eq!(updated.title, "新标题");
         assert_eq!(updated.content, "这是内容");
+    }
+
+    #[test]
+    fn rename_note_changes_title_keeps_content() {
+        let conn = init_in_memory().unwrap();
+        let n = create(&conn, "T").unwrap();
+        update(&conn, n.id, "T", "正文保留").unwrap();
+        let renamed = rename(&conn, n.id, "新标题").unwrap();
+        assert_eq!(renamed.title, "新标题");
+        assert_eq!(renamed.content, "正文保留");
+        let again = get(&conn, n.id).unwrap();
+        assert_eq!(again.content, "正文保留");
+    }
+
+    #[test]
+    fn rename_note_empty_becomes_default_title() {
+        let conn = init_in_memory().unwrap();
+        let n = create(&conn, "T").unwrap();
+        update(&conn, n.id, "T", "x").unwrap();
+        let renamed = rename(&conn, n.id, "   ").unwrap();
+        assert_eq!(renamed.title, "无标题笔记");
+        assert_eq!(renamed.content, "x");
+    }
+
+    #[test]
+    fn rename_note_missing_is_not_found() {
+        let conn = init_in_memory().unwrap();
+        let err = rename(&conn, 999_999, "x").unwrap_err();
+        assert!(
+            err.to_string().contains("NOT_FOUND"),
+            "expected NOT_FOUND, got: {err}"
+        );
     }
 
     #[test]

@@ -891,6 +891,8 @@ export const tauriApi = {
     invoke<Note>('create_note', { title, folderId: folderId ?? null }),
   updateNote: (id: number, title: string, content: string) =>
     invoke<Note>('update_note', { id, title, content }),
+  renameNote: (id: number, title: string) =>
+    invoke<Note>('rename_note', { id, title }),
   deleteNote: (id: number) => invoke<void>('delete_note', { id }),
   reorderNotes: (ids: number[]) => invoke<void>('reorder_notes', { ids }),
   setNoteSourcePath: (noteId: number, sourcePath: string | null) =>

@@ -287,6 +287,20 @@ pub fn update_note(
 }
 
 #[tauri::command]
+pub fn rename_note(
+    state: State<'_, DbState>,
+    id: i64,
+    title: String,
+) -> Result<Note, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let note = note::rename(&conn, id, &title).map_err(err_str)?;
+    log::info!("重命名笔记: id={} -> {}", id, note.title);
+    drop(conn);
+    crate::kb_hooks::on_notes_changed(&[id]);
+    Ok(note)
+}
+
+#[tauri::command]
 pub fn delete_note(state: State<'_, DbState>, id: i64) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     note::delete(&conn, id).map_err(err_str)?;
