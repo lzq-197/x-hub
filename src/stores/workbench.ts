@@ -357,6 +357,38 @@ export function useStore() {
     return n
   }
 
+  function normalizeNoteTitle(title: string): string {
+    const t = title.trim()
+    return t ? t : '无标题笔记'
+  }
+
+  async function renameNote(id: number, title: string) {
+    const nextTitle = normalizeNoteTitle(title)
+    if (!isTauri()) {
+      const i = state.notes.findIndex((x) => x.id === id)
+      if (i < 0) throw new Error('笔记不存在')
+      const prev = state.notes[i]!
+      const n: Note = {
+        ...prev,
+        title: nextTitle,
+        updated_at: new Date().toISOString(),
+      }
+      state.notes[i] = n
+      return n
+    }
+    const n = await tauriApi.renameNote(id, nextTitle)
+    const i = state.notes.findIndex((x) => x.id === id)
+    if (i >= 0) {
+      const prev = state.notes[i]!
+      // 防 list_meta / 空 content 回写冲掉本地已有正文
+      state.notes[i] = {
+        ...n,
+        content: n.content || prev.content,
+      }
+    }
+    return n
+  }
+
   async function removeNote(id: number) {
     if (isTauri()) await tauriApi.deleteNote(id)
     state.notes = state.notes.filter((x) => x.id !== id)
@@ -1465,6 +1497,7 @@ export function useStore() {
     openResourceInBrowser,
     addNote,
     saveNote,
+    renameNote,
     removeNote,
     refreshNotes,
     reorderNotes,
