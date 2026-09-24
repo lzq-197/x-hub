@@ -1098,10 +1098,8 @@ defineExpose({ flatFolderOptions })
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-soft);
   overflow: hidden;
+  /* 无内层卡片壳：border / radius / bg 已去掉，铺在外层 .card.note-list 上 */
 }
 .nl-tree-head {
   display: flex;
