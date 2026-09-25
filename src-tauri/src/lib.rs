@@ -12,6 +12,7 @@ mod credentials;
 mod countdown_ticker;
 mod countdown_window;
 mod db;
+mod embed;
 mod extension;
 mod ext_protocol;
 mod floating_ball;
