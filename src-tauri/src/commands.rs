@@ -2596,7 +2596,8 @@ pub(crate) fn pick_chat_model(
         .filter(|m| crate::chat::is_platform_model(m))
         .collect();
     let wants_platform = session_model_name == crate::chat::PLATFORM_ENTRY_NAME
-        || platform.iter().any(|m| m.name == session_model_name);
+        || session_model_name.starts_with("platform:")
+        || platform.iter().any(|m| m.name == session_model_name || m.id == session_model_name);
     if wants_platform {
         if platform.is_empty() {
             return Err("平台额度未开启，请在「设置 → 功能 → AI 助手」开启后再发送".into());
@@ -3397,6 +3398,15 @@ mod tests {
         let models = vec![platform_chat_model("a"), platform_chat_model("b")];
         let first = pick_chat_model(&models, "a（平台额度）").unwrap().model;
         let second = pick_chat_model(&models, "a（平台额度）").unwrap().model;
+        assert_ne!(first, second);
+    }
+
+    /// raw `platform:*` id（kb_ask 等）→ 视为平台入口，走轮询而非精确 id 匹配
+    #[test]
+    fn platform_id_prefix_triggers_load_balance() {
+        let models = vec![platform_chat_model("a"), platform_chat_model("b")];
+        let first = pick_chat_model(&models, "platform:a").unwrap().model;
+        let second = pick_chat_model(&models, "platform:a").unwrap().model;
         assert_ne!(first, second);
     }
 

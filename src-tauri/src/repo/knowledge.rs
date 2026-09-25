@@ -623,11 +623,12 @@ pub fn hybrid_search(
 
     let embedded = load_chunks_with_notes(conn, true).map_err(|e| e.to_string())?;
 
-    // 1) 向量检索：取 top_k*3 候选
+    // 1) 向量检索：仅按 vector_score 排序，取 top_k*3 候选（§5.6.2）
     let candidate_n = top_k.saturating_mul(3).max(top_k);
     let mut scored: Vec<(f64, f64, i64, ChunkRow)> = Vec::new();
 
     if !query_vec.is_empty() {
+        let mut by_vector: Vec<(f64, ChunkRow)> = Vec::new();
         for row in embedded {
             let Some(blob) = row.embedding.as_deref() else {
                 continue;
@@ -639,19 +640,24 @@ pub fn hybrid_search(
                 continue;
             }
             let vector_score = cosine(query_vec, &vec);
+            by_vector.push((vector_score, row));
+        }
+        by_vector.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        if by_vector.len() > candidate_n {
+            by_vector.truncate(candidate_n);
+        }
+
+        // 2) 对候选施加关键词加分，再按混合分排序
+        for (vector_score, row) in by_vector {
             let hay = format!("{} {} {}", row.note_title, row.heading, row.content);
             let keyword_hits = count_keyword_hits(&hay, &keywords);
             let score = vector_score * 0.7 + (keyword_hits.min(10) as f64) * 0.05;
             scored.push((score, vector_score, keyword_hits, row));
         }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        if scored.len() > candidate_n {
-            scored.truncate(candidate_n);
-        }
     }
 
-    // 2) 按混合分取 top_k
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    // 3) 按混合分取 top_k
     let mut results: Vec<KbChunkHit> = Vec::new();
     let mut seen_ids: HashSet<i64> = HashSet::new();
     for (score, vector_score, keyword_hits, row) in scored.into_iter().take(top_k) {
@@ -660,7 +666,7 @@ pub fn hybrid_search(
         results.push(to_hit(&row, fp, score, vector_score, keyword_hits));
     }
 
-    // 3) 向量未就绪 / 命中不足：关键词 LIKE 补足
+    // 4) 向量未就绪 / 命中不足：关键词 LIKE 补足
     if results.len() < top_k {
         let all = load_chunks_with_notes(conn, false).map_err(|e| e.to_string())?;
         let mut like_hits: Vec<(i64, ChunkRow)> = Vec::new();
@@ -1156,6 +1162,57 @@ mod tests {
         assert!(hits.len() <= 10);
         let hits2 = hybrid_search(&conn, &[], "架构", 1).unwrap();
         assert!(hits2.len() <= 3);
+    }
+
+    /// §5.6.2：候选池先按 vector_score 截断，再关键词加分。
+    /// top_k=3 → 候选 9；第 10 名高关键词低向量不得挤掉第 9 名高向量低关键词。
+    #[test]
+    fn hybrid_search_candidate_cut_is_vector_only() {
+        let conn = crate::db::init_in_memory().unwrap();
+        let query = [1.0f32, 0.0, 0.0];
+        // 9 个高向量、正文无关键词（query 用「架构设计」）
+        for i in 0..9 {
+            let n = crate::repo::note::create(&conn, &format!("hv{i}")).unwrap();
+            // 余弦随 i 略降，但仍远高于低向量块
+            let v = embedding_to_blob(&[1.0 - (i as f32) * 0.01, 0.0, 0.0]);
+            insert_chunk(
+                &conn,
+                n.id,
+                0,
+                "",
+                &format!("semantic body {i}"),
+                3,
+                "m",
+                Some(&v),
+                None,
+            )
+            .unwrap();
+        }
+        // 第 10 名：低向量但关键词极强
+        let n_kw = crate::repo::note::create(&conn, "架构设计笔记").unwrap();
+        let far = embedding_to_blob(&[0.0f32, 1.0, 0.0]);
+        insert_chunk(
+            &conn,
+            n_kw.id,
+            0,
+            "架构",
+            "架构设计 架构设计 架构设计 架构设计",
+            3,
+            "m",
+            Some(&far),
+            None,
+        )
+        .unwrap();
+
+        let hits = hybrid_search(&conn, &query, "架构设计", 3).unwrap();
+        assert_eq!(hits.len(), 3);
+        // 高向量块应进最终 top_3；低向量高关键词块不得因关键词挤进候选后上位
+        assert!(
+            hits.iter().all(|h| h.note_id != n_kw.id),
+            "low-vector high-keyword chunk must stay outside vector candidate cut; got: {:?}",
+            hits.iter().map(|h| (h.note_id, h.vector_score, h.keyword_hits)).collect::<Vec<_>>()
+        );
+        assert!(hits.iter().all(|h| h.vector_score > 0.9));
     }
 
 }

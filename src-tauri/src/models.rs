@@ -522,6 +522,8 @@ pub struct KbEmbedConfigView {
     pub base_url: String,
     pub model: String,
     pub has_api_key: bool,
+    /// 检索返回条数（3–10），供 UI round-trip
+    pub top_k: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
