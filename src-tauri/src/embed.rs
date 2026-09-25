@@ -36,6 +36,8 @@ pub fn get_embed_api_key() -> Option<String> {
     }
 }
 
+/// 显式清除钥匙串 Key（保存留空不调用——留空 = 保留已有 Key）。
+#[allow(dead_code)]
 pub fn clear_embed_api_key() -> Result<(), String> {
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
         let _ = entry.delete_credential();

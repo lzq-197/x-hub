@@ -57,8 +57,8 @@ const statusLabel = computed(() => {
   const s = status.value
   if (!s) return '加载中…'
   if (s.status === 'indexing') {
-    const pct =
-      s.total_notes > 0 ? Math.round((s.progress / s.total_notes) * 100) : 0
+    // status.progress 已是 0–100 百分比（后端 set_meta_progress），勿再除 total_notes
+    const pct = Math.min(100, Math.max(0, Math.round(Number(s.progress) || 0)))
     return `索引中 ${pct}%`
   }
   if (s.status === 'error') return s.error?.trim() || '索引出错'
@@ -85,10 +85,12 @@ async function onRebuild() {
   try {
     await tauriApi.kbRebuildIndex((e) => {
       if (status.value) {
+        const progress =
+          e.total > 0 ? Math.min(99, Math.round((e.done * 100) / e.total)) : 100
         status.value = {
           ...status.value,
           status: 'indexing',
-          progress: e.done,
+          progress,
           total_notes: e.total,
         }
       }
@@ -273,6 +275,12 @@ async function submitAsk() {
     }
     if (!accountLoggedIn.value) {
       showToast('平台额度需登录账号（设置 → 账号）')
+      return
+    }
+  } else {
+    const m = models.value.find((x) => x.name === selectedModel.value)
+    if (!m?.has_api_key) {
+      showToast('当前模型未配置 API Key（设置 → AI 助手）')
       return
     }
   }

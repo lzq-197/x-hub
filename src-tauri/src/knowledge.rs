@@ -932,9 +932,8 @@ pub fn save_kb_embed_config(
     }
     crate::config::save(&cfg)?;
 
-    if api_key.trim().is_empty() {
-        crate::embed::clear_embed_api_key()?;
-    } else {
+    // 留空 = 保留钥匙串已有 Key（与 AI 供应商「留空不修改」一致）；只在非空时覆盖写入
+    if !api_key.trim().is_empty() {
         crate::embed::save_embed_api_key(api_key.trim())?;
     }
 
