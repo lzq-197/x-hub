@@ -21,7 +21,7 @@ import { isTauri, tauriApi } from '../api/tauri'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import type { Countdown, ExtensionEntry, Note, Resource, Todo } from '../api/tauri'
 import { playChime } from '../utils/chime'
-import { FileText, FolderOpen, LayoutDashboard, ListTodo, MessageSquare, Puzzle, Settings, ChevronLeft, ChevronRight, AppWindow, PanelRight } from 'lucide-vue-next'
+import { BrainCircuit, FileText, FolderOpen, LayoutDashboard, ListTodo, MessageSquare, Puzzle, Settings, ChevronLeft, ChevronRight, AppWindow, PanelRight } from 'lucide-vue-next'
 import type { Component } from 'vue'
 import { useTheme } from '../composables/useTheme'
 import { broadcastThemeToFrames } from '../composables/themeTokens'
@@ -40,6 +40,7 @@ const NoteEditor = defineAsyncComponent(() => import('../components/NoteEditor.v
 const GlobalSearch = defineAsyncComponent(() => import('../components/GlobalSearch.vue'))
 // 待办视图：自带编辑弹层 / 确认弹窗 / 日期时间字段，体量大且非首屏，同样按需分包
 const TodoView = defineAsyncComponent(() => import('../components/TodoView.vue'))
+const KnowledgeView = defineAsyncComponent(() => import('../components/KnowledgeView.vue'))
 // 设置页：加载期间用同骨架占位（**delay 0**：以前设 80ms 是为了避免骨架一闪而过，
 // 结果那 80ms 是纯空白 —— 用户感知到的「点设置先空白」有一半来自这里）
 // 另外启动后空闲时预热这个 chunk，点「设置」时直接命中模块缓存，几乎零等待。
@@ -115,6 +116,7 @@ const navigation = [
   { id: 'dashboard', label: '工作台', icon: LayoutDashboard },
   { id: 'todos', label: '待办', icon: ListTodo },
   { id: 'notes', label: '速记', icon: FileText },
+  { id: 'kb', label: '知识库', icon: BrainCircuit },
   { id: 'suda', label: '速达', icon: FolderOpen },
   { id: 'chat', label: '对话', icon: MessageSquare },
 ] as const
@@ -694,6 +696,12 @@ function onOpenNote(n: Note) {
   searchVisible.value = false
 }
 
+/** 知识库引用来源：按笔记 id 打开速记 */
+function onOpenNoteById(id: number) {
+  activeNoteId.value = id
+  activeView.value = 'notes'
+}
+
 // ---- 轻提示 ----
 interface ToastAction {
   label: string
@@ -884,6 +892,12 @@ provide('showToast', showToast)
             />
           </div>
         </section>
+
+        <!-- 知识库：RAG 问答（无地图/标签云） -->
+        <KnowledgeView
+          v-else-if="activeView === 'kb'"
+          @open-note="onOpenNoteById"
+        />
 
         <!-- 速达：独立视图 -->
         <section v-else-if="activeView === 'suda'" class="view view-suda" tabindex="-1" aria-label="速达">

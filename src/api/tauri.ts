@@ -846,6 +846,66 @@ export type ChatStreamEvent =
   | { type: 'done'; message: ChatMessage; session: ChatSession }
   | { type: 'error'; message: string; partial: string }
 
+/** 知识库 RAG 引用来源（kb_ask Done） */
+export interface Citation {
+  index: number
+  note_id: number
+  note_title: string
+  folder_path: string
+  heading: string
+  snippet: string
+}
+
+/** 知识库索引 / 嵌入状态（kb_get_status / kb_ask 附带） */
+export interface KbStatus {
+  status: string
+  indexed_notes: number
+  chunk_count: number
+  model: string
+  last_indexed_at: string | null
+  error: string | null
+  progress: number
+  total_notes: number
+  embedding_ready: boolean
+}
+
+export interface KbChunkHit {
+  chunk_id: number
+  note_id: number
+  note_title: string
+  folder_path: string
+  heading: string
+  content: string
+  score: number
+  vector_score: number
+  keyword_hits: number
+}
+
+/** 与 Rust `KbAskEvent` 对齐：`#[serde(tag = "type", rename_all = "camelCase")]` */
+export type KbAskEvent =
+  | { type: 'chunk'; content: string }
+  | { type: 'done'; answer: string; citations: Citation[]; kbStatus: KbStatus }
+  | { type: 'error'; message: string; partial: string }
+
+export interface IndexProgressEvent {
+  stage: string
+  done: number
+  total: number
+}
+
+export interface KbEmbedConfigView {
+  base_url: string
+  model: string
+  has_api_key: boolean
+  top_k: number
+}
+
+export interface EmbedTestResult {
+  ok: boolean
+  message: string
+  dim: number | null
+}
+
 export const isTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 export const tauriApi = {
@@ -919,8 +979,36 @@ export const tauriApi = {
   setNoteFolder: (noteId: number, folderId: number | null) =>
     invoke<Note>('set_note_folder', { noteId, folderId }),
   importMarkdown: (path: string) => invoke<ImportResult>('import_markdown', { path }),
-  /** 索引 stub：无副作用，供导入/保存调用点预留 */
+  // ---- 知识库 RAG ----
   kbIndexNote: (noteId: number) => invoke<void>('kb_index_note', { noteId }),
+  kbRebuildIndex: (onProgress: (e: IndexProgressEvent) => void) => {
+    const channel = new Channel<IndexProgressEvent>()
+    channel.onmessage = onProgress
+    return invoke<void>('kb_rebuild_index', { onProgress: channel })
+  },
+  kbGetStatus: () => invoke<KbStatus>('kb_get_status'),
+  kbSearch: (query: string, topK?: number | null) =>
+    invoke<KbChunkHit[]>('kb_search', { query, topK: topK ?? null }),
+  kbAsk: (
+    question: string,
+    modelId: string,
+    topK: number | null,
+    onEvent: (e: KbAskEvent) => void,
+  ) => {
+    const channel = new Channel<KbAskEvent>()
+    channel.onmessage = onEvent
+    return invoke<void>('kb_ask', { question, modelId, topK, onEvent: channel })
+  },
+  getKbEmbedConfig: () => invoke<KbEmbedConfigView>('get_kb_embed_config'),
+  saveKbEmbedConfig: (baseUrl: string, model: string, apiKey: string, topK?: number | null) =>
+    invoke<KbEmbedConfigView>('save_kb_embed_config', {
+      baseUrl,
+      model,
+      apiKey,
+      topK: topK ?? null,
+    }),
+  kbTestEmbed: (baseUrl: string, model: string, apiKey: string) =>
+    invoke<EmbedTestResult>('kb_test_embed', { baseUrl, model, apiKey }),
   searchAll: (keyword: string) => invoke<SearchResult>('search_all', { keyword }),
   listTodos: () => invoke<Todo[]>('list_todos'),
   createTodo: (title: string, parentId?: number | null, createdAt?: string) =>

@@ -322,6 +322,22 @@ export function useStore() {
     if (r) r.last_launched_at = new Date().toISOString()
   }
 
+  // ---- 知识库增量索引（保存/新建后 2s 防抖；失败静默，状态栏可见） ----
+  let kbIndexTimer: ReturnType<typeof setTimeout> | null = null
+  const pendingKbIds = new Set<number>()
+  function scheduleKbIndex(id: number) {
+    pendingKbIds.add(id)
+    if (kbIndexTimer) clearTimeout(kbIndexTimer)
+    kbIndexTimer = setTimeout(() => {
+      const ids = [...pendingKbIds]
+      pendingKbIds.clear()
+      kbIndexTimer = null
+      for (const nid of ids) {
+        void tauriApi.kbIndexNote(nid).catch(() => {})
+      }
+    }, 2000)
+  }
+
   // ---- 笔记 ----
   async function addNote(title: string, folderId: number | null = null) {
     const n = isTauri()
@@ -337,6 +353,7 @@ export function useStore() {
         }
     state.notes.unshift(n)
     if (folderId != null) await refreshFolders()
+    if (isTauri()) scheduleKbIndex(n.id)
     return n
   }
 
@@ -354,6 +371,7 @@ export function useStore() {
         }
     const idx = state.notes.findIndex((x) => x.id === id)
     if (idx >= 0) state.notes[idx] = n
+    if (isTauri()) scheduleKbIndex(n.id)
     return n
   }
 
