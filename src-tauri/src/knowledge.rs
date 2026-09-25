@@ -1,7 +1,10 @@
 //! Markdown 导入 + 知识库索引流水线（分块 / 嵌入 / kb_meta）。
 
 use crate::commands::DbState;
-use crate::models::{ImportResult, IndexProgressEvent, KbStatus};
+use crate::models::{
+    ChatMessage, Citation, EmbedTestResult, ImportResult, IndexProgressEvent, KbAskEvent,
+    KbChunkHit, KbEmbedConfigView, KbStatus,
+};
 use crate::repo::{folder, knowledge as kb_repo, note};
 use rusqlite::Connection;
 use std::cell::Cell;
@@ -665,6 +668,309 @@ fn display_path(path: &Path) -> String {
 fn push_error(errors: &mut Vec<String>, msg: String) {
     if errors.len() < MAX_ERRORS {
         errors.push(msg);
+    }
+}
+
+
+fn resolve_top_k(top_k: Option<i64>) -> i64 {
+    top_k
+        .unwrap_or_else(|| crate::config::load().kb_top_k)
+        .clamp(3, 10)
+}
+
+fn snippet_of(content: &str) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    if chars.len() <= 200 {
+        content.to_string()
+    } else {
+        chars[..200].iter().collect::<String>() + "…"
+    }
+}
+
+fn hits_to_citations(hits: &[KbChunkHit]) -> Vec<Citation> {
+    hits.iter()
+        .enumerate()
+        .map(|(i, h)| Citation {
+            index: (i + 1) as i64,
+            note_id: h.note_id,
+            note_title: h.note_title.clone(),
+            folder_path: h.folder_path.clone(),
+            heading: h.heading.clone(),
+            snippet: snippet_of(&h.content),
+        })
+        .collect()
+}
+
+fn build_rag_system_prompt(hits: &[KbChunkHit]) -> String {
+    let mut parts = String::from(
+        "你是「x-hub 个人知识库」的智能助手。请基于下方【知识库片段】回答用户问题。\n\
+\n\
+## 规则\n\
+1. 只依据知识库片段回答；片段未覆盖的，明确说「知识库中没有相关内容」，不要编造。\n\
+2. 引用来源：在答案中需要引用处用 [1] [2] ... 标注，编号对应下方片段序号。\n\
+3. 每个结论尽量带引用；引用编号必须真实存在于片段列表中。\n\
+4. 回答使用与用户问题相同的语言（中文问题用中文回答）。\n\
+5. 如果片段之间有冲突，指出冲突并分别标注引用。\n\
+\n\
+## 知识库片段\n",
+    );
+    for (i, h) in hits.iter().enumerate() {
+        let n = i + 1;
+        let heading_part = if h.heading.trim().is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", h.heading)
+        };
+        parts.push_str(&format!(
+            "[{n}] 来自《{title}》{heading}：\n{content}\n\n",
+            title = h.note_title,
+            heading = heading_part,
+            content = h.content,
+        ));
+    }
+    parts
+}
+
+const NO_HIT_SYSTEM: &str = "你是个人知识库助手。用户的知识库中未检索到相关内容，请基于通用知识回答，并在开头说明「知识库中未找到直接相关内容，以下为通用回答」。";
+
+fn chat_msg(role: &str, content: String) -> ChatMessage {
+    ChatMessage {
+        id: 0,
+        session_id: 0,
+        role: role.into(),
+        content,
+        created_at: String::new(),
+    }
+}
+
+/// 嵌入 query → hybrid_search（锁外嵌入，锁内检索）。
+#[tauri::command]
+pub async fn kb_search(
+    app: AppHandle,
+    query: String,
+    top_k: Option<i64>,
+) -> Result<Vec<KbChunkHit>, String> {
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Ok(vec![]);
+    }
+    let top_k = resolve_top_k(top_k);
+    let cfg = embed_config_from_disk();
+
+    let query_vec = match crate::embed::embed_batch(&cfg, &[query.clone()]).await {
+        Ok(mut vecs) => vecs.pop().unwrap_or_default(),
+        Err(e) => {
+            log::warn!("kb_search embed failed, keyword fallback: {e}");
+            Vec::new()
+        }
+    };
+
+    let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_repo::hybrid_search(&conn, &query_vec, &query, top_k)
+}
+
+/// RAG 流式问答：检索 → 注入 system prompt → stream_chat → Channel 事件。
+#[tauri::command]
+pub async fn kb_ask(
+    app: AppHandle,
+    question: String,
+    model_id: String,
+    top_k: Option<i64>,
+    on_event: tauri::ipc::Channel<KbAskEvent>,
+) -> Result<(), String> {
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Err("问题不能为空".into());
+    }
+    let top_k = resolve_top_k(top_k);
+
+    // 模型解析：platform 走 pick_chat_model；其余按 id/name 精确匹配
+    let models = crate::config::load().chat_models;
+    let wants_platform = model_id == crate::chat::PLATFORM_ENTRY_NAME
+        || models.iter().any(|m| {
+            crate::chat::is_platform_model(m) && (m.name == model_id || m.id == model_id)
+        });
+    let model = if wants_platform {
+        crate::commands::pick_chat_model(&models, &model_id)?
+    } else {
+        models
+            .iter()
+            .find(|m| m.id == model_id || m.name == model_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!("模型「{model_id}」不存在，请先在设置 → AI助手 中配置")
+            })?
+    };
+
+    // 检索（复用 kb_search 逻辑：锁外嵌入）
+    let cfg = embed_config_from_disk();
+    let query_vec = match crate::embed::embed_batch(&cfg, &[question.clone()]).await {
+        Ok(mut vecs) => vecs.pop().unwrap_or_default(),
+        Err(e) => {
+            log::warn!("kb_ask embed failed, keyword fallback: {e}");
+            Vec::new()
+        }
+    };
+    let hits = {
+        let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        kb_repo::hybrid_search(&conn, &query_vec, &question, top_k)?
+    };
+
+    let (messages, citations) = if hits.is_empty() {
+        (
+            vec![
+                chat_msg("system", NO_HIT_SYSTEM.into()),
+                chat_msg("user", question.clone()),
+            ],
+            Vec::new(),
+        )
+    } else {
+        let system = build_rag_system_prompt(&hits);
+        let citations = hits_to_citations(&hits);
+        (
+            vec![
+                chat_msg("system", system),
+                chat_msg("user", question.clone()),
+            ],
+            citations,
+        )
+    };
+
+    let mut reply = String::new();
+    let chunk_sender = on_event.clone();
+    let result = crate::chat::stream_chat(&model, &messages, &mut reply, |delta| {
+        chunk_sender
+            .send(KbAskEvent::Chunk { content: delta })
+            .map_err(|e| e.to_string())
+    })
+    .await;
+
+    match result {
+        Ok(_) if !reply.trim().is_empty() => {
+            let kb_status = {
+                let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+                let conn = state.0.lock().map_err(|e| e.to_string())?;
+                let (status, progress, model_name, _, _, last_indexed_at, error) =
+                    kb_repo::get_meta(&conn).map_err(|e| e.to_string())?;
+                let indexed_notes =
+                    kb_repo::count_indexed_notes(&conn).map_err(|e| e.to_string())?;
+                let chunk_count = kb_repo::count_chunks(&conn).map_err(|e| e.to_string())?;
+                let total_notes = kb_repo::count_notes(&conn).map_err(|e| e.to_string())?;
+                let cfg = crate::config::load();
+                let embedding_ready = !cfg.kb_embed_base_url.trim().is_empty()
+                    && !cfg.kb_embed_model.trim().is_empty();
+                KbStatus {
+                    status,
+                    indexed_notes,
+                    chunk_count,
+                    model: model_name,
+                    last_indexed_at,
+                    error,
+                    progress,
+                    total_notes,
+                    embedding_ready,
+                }
+            };
+            on_event
+                .send(KbAskEvent::Done {
+                    answer: reply,
+                    citations,
+                    kb_status,
+                })
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(_) => {
+            on_event
+                .send(KbAskEvent::Error {
+                    message: "模型未返回任何内容".into(),
+                    partial: reply,
+                })
+                .map_err(|e| e.to_string())?;
+        }
+        Err(e) => {
+            on_event
+                .send(KbAskEvent::Error {
+                    message: e,
+                    partial: reply,
+                })
+                .map_err(|e2| e2.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_kb_embed_config() -> Result<KbEmbedConfigView, String> {
+    let cfg = crate::config::load();
+    Ok(KbEmbedConfigView {
+        base_url: cfg.kb_embed_base_url,
+        model: cfg.kb_embed_model,
+        has_api_key: crate::embed::get_embed_api_key()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false),
+    })
+}
+
+#[tauri::command]
+pub fn save_kb_embed_config(
+    base_url: String,
+    model: String,
+    api_key: String,
+    top_k: Option<i64>,
+) -> Result<KbEmbedConfigView, String> {
+    let mut cfg = crate::config::load();
+    cfg.kb_embed_base_url = base_url.trim().to_string();
+    cfg.kb_embed_model = model.trim().to_string();
+    if let Some(k) = top_k {
+        cfg.kb_top_k = k.clamp(3, 10);
+    }
+    crate::config::save(&cfg)?;
+
+    if api_key.trim().is_empty() {
+        crate::embed::clear_embed_api_key()?;
+    } else {
+        crate::embed::save_embed_api_key(api_key.trim())?;
+    }
+
+    Ok(KbEmbedConfigView {
+        base_url: cfg.kb_embed_base_url,
+        model: cfg.kb_embed_model,
+        has_api_key: crate::embed::get_embed_api_key()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false),
+    })
+}
+
+#[tauri::command]
+pub async fn kb_test_embed(
+    base_url: String,
+    model: String,
+    api_key: String,
+) -> Result<EmbedTestResult, String> {
+    let api_key = if api_key.trim().is_empty() {
+        crate::embed::get_embed_api_key()
+    } else {
+        Some(api_key.trim().to_string())
+    };
+    let cfg = crate::embed::EmbedConfig {
+        base_url: base_url.trim().to_string(),
+        model: model.trim().to_string(),
+        api_key,
+    };
+    match crate::embed::test_connection(&cfg).await {
+        Ok((_model, dim)) => Ok(EmbedTestResult {
+            ok: true,
+            message: format!("连接成功，向量维度 {dim}"),
+            dim: Some(dim as i64),
+        }),
+        Err(e) => Ok(EmbedTestResult {
+            ok: false,
+            message: e,
+            dim: None,
+        }),
     }
 }
 

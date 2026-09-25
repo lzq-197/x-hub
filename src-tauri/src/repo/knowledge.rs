@@ -1,4 +1,6 @@
+use crate::models::KbChunkHit;
 use rusqlite::{params, Connection};
+use std::collections::{HashMap, HashSet};
 
 const TARGET_CHUNK_LEN: usize = 500;
 const MAX_CHUNK_LEN: usize = 1000;
@@ -386,6 +388,313 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
+
+/// 中文停用词（混合检索关键词提取）
+const STOP_WORDS: &[&str] = &[
+    "的", "了", "吗", "呢", "是", "我", "你", "他", "她", "它", "这", "那", "有", "在", "和",
+    "与", "就", "都", "也", "很", "着", "过", "把", "被", "让", "给", "从", "到", "对", "为",
+    "以", "而", "或", "但", "如果", "因为", "所以", "什么", "怎么", "怎样", "如何",
+    "一个", "没有", "可以", "不是", "这个", "那个", "我们", "你们", "他们", "它们", "啊", "吧",
+];
+
+/// 文件夹路径：根→叶用 ` / ` 拼接；未分类 / 缺失 →「未分类」
+pub fn folder_path(conn: &Connection, folder_id: Option<i64>) -> String {
+    let Some(mut id) = folder_id else {
+        return "未分类".into();
+    };
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(id) {
+            break;
+        }
+        match conn.query_row(
+            "SELECT parent_id, name FROM note_folders WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)),
+        ) {
+            Ok((parent, name)) => {
+                names.push(name);
+                match parent {
+                    Some(p) => id = p,
+                    None => break,
+                }
+            }
+            Err(_) => {
+                names.clear();
+                break;
+            }
+        }
+    }
+    if names.is_empty() {
+        return "未分类".into();
+    }
+    names.reverse();
+    names.join(" / ")
+}
+
+/// 关键词提取：去标点/停用词；中文 2-gram + 整词；英文按空白分词。
+pub fn extract_keywords(query: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let flush_buf = |buf: &mut String, tokens: &mut Vec<String>| {
+        if buf.is_empty() {
+            return;
+        }
+        let word = std::mem::take(buf);
+        let lower = word.to_lowercase();
+        if is_stop_word(&lower) {
+            return;
+        }
+        // 英文/数字词
+        if word.chars().all(|c| c.is_ascii_alphanumeric()) {
+            if word.chars().count() >= 2 {
+                tokens.push(lower);
+            }
+            return;
+        }
+        // 中文：整词（≥2 字）+ 2-gram
+        let chars: Vec<char> = word.chars().collect();
+        if chars.len() >= 2 {
+            tokens.push(word.clone());
+        }
+        if chars.len() >= 2 {
+            for i in 0..chars.len().saturating_sub(1) {
+                let gram: String = chars[i..i + 2].iter().collect();
+                if !is_stop_word(&gram) {
+                    tokens.push(gram);
+                }
+            }
+        }
+    };
+
+    for ch in query.chars() {
+        if ch.is_whitespace() || is_punct(ch) {
+            flush_buf(&mut buf, &mut tokens);
+        } else {
+            // 中英切换时切开
+            let prev_ascii = buf
+                .chars()
+                .last()
+                .map(|c| c.is_ascii_alphanumeric())
+                .unwrap_or(false);
+            let cur_ascii = ch.is_ascii_alphanumeric();
+            if !buf.is_empty() && prev_ascii != cur_ascii {
+                flush_buf(&mut buf, &mut tokens);
+            }
+            buf.push(ch);
+        }
+    }
+    flush_buf(&mut buf, &mut tokens);
+
+    // 去重保序
+    let mut seen = HashSet::new();
+    tokens
+        .into_iter()
+        .filter(|t| seen.insert(t.clone()))
+        .collect()
+}
+
+fn is_punct(c: char) -> bool {
+    c.is_ascii_punctuation()
+        || matches!(
+            c,
+            '，' | '。'
+                | '！'
+                | '？'
+                | '；'
+                | '：'
+                | '、'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '\u{201c}'
+                | '\u{201d}'
+                | '\u{2018}'
+                | '\u{2019}'
+                | '·'
+                | '…'
+        )
+}
+
+fn is_stop_word(w: &str) -> bool {
+    STOP_WORDS.contains(&w)
+}
+
+fn count_keyword_hits(haystack: &str, keywords: &[String]) -> i64 {
+    if keywords.is_empty() || haystack.is_empty() {
+        return 0;
+    }
+    let lower = haystack.to_lowercase();
+    keywords
+        .iter()
+        .filter(|k| {
+            if k.chars().all(|c| c.is_ascii()) {
+                lower.contains(&k.to_lowercase())
+            } else {
+                haystack.contains(k.as_str())
+            }
+        })
+        .count() as i64
+}
+
+struct ChunkRow {
+    chunk_id: i64,
+    note_id: i64,
+    note_title: String,
+    folder_id: Option<i64>,
+    heading: String,
+    content: String,
+    embedding: Option<Vec<u8>>,
+}
+
+fn load_chunks_with_notes(conn: &Connection, only_embedded: bool) -> rusqlite::Result<Vec<ChunkRow>> {
+    let sql = if only_embedded {
+        "SELECT c.id, c.note_id, n.title, n.folder_id, c.heading, c.content, c.embedding
+         FROM kb_chunks c
+         JOIN notes n ON n.id = c.note_id
+         WHERE c.embedding IS NOT NULL"
+    } else {
+        "SELECT c.id, c.note_id, n.title, n.folder_id, c.heading, c.content, c.embedding
+         FROM kb_chunks c
+         JOIN notes n ON n.id = c.note_id"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ChunkRow {
+            chunk_id: r.get(0)?,
+            note_id: r.get(1)?,
+            note_title: r.get(2)?,
+            folder_id: r.get(3)?,
+            heading: r.get(4)?,
+            content: r.get(5)?,
+            embedding: r.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn path_cache_get(
+    cache: &mut HashMap<Option<i64>, String>,
+    conn: &Connection,
+    folder_id: Option<i64>,
+) -> String {
+    if let Some(p) = cache.get(&folder_id) {
+        return p.clone();
+    }
+    let p = folder_path(conn, folder_id);
+    cache.insert(folder_id, p.clone());
+    p
+}
+
+fn to_hit(
+    row: &ChunkRow,
+    folder_path: String,
+    score: f64,
+    vector_score: f64,
+    keyword_hits: i64,
+) -> KbChunkHit {
+    KbChunkHit {
+        chunk_id: row.chunk_id,
+        note_id: row.note_id,
+        note_title: row.note_title.clone(),
+        folder_path,
+        heading: row.heading.clone(),
+        content: row.content.clone(),
+        score,
+        vector_score,
+        keyword_hits,
+    }
+}
+
+/// 混合检索：向量余弦 + 关键词 2-gram 加分；向量不足时 LIKE 降级补足。
+pub fn hybrid_search(
+    conn: &Connection,
+    query_vec: &[f32],
+    query_text: &str,
+    top_k: i64,
+) -> Result<Vec<KbChunkHit>, String> {
+    let top_k = top_k.clamp(3, 10) as usize;
+    let keywords = extract_keywords(query_text);
+    let mut path_cache: HashMap<Option<i64>, String> = HashMap::new();
+
+    let embedded = load_chunks_with_notes(conn, true).map_err(|e| e.to_string())?;
+
+    // 1) 向量检索：取 top_k*3 候选
+    let candidate_n = top_k.saturating_mul(3).max(top_k);
+    let mut scored: Vec<(f64, f64, i64, ChunkRow)> = Vec::new();
+
+    if !query_vec.is_empty() {
+        for row in embedded {
+            let Some(blob) = row.embedding.as_deref() else {
+                continue;
+            };
+            let Ok(vec) = blob_to_embedding(blob) else {
+                continue;
+            };
+            if vec.is_empty() {
+                continue;
+            }
+            let vector_score = cosine(query_vec, &vec);
+            let hay = format!("{} {} {}", row.note_title, row.heading, row.content);
+            let keyword_hits = count_keyword_hits(&hay, &keywords);
+            let score = vector_score * 0.7 + (keyword_hits.min(10) as f64) * 0.05;
+            scored.push((score, vector_score, keyword_hits, row));
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        if scored.len() > candidate_n {
+            scored.truncate(candidate_n);
+        }
+    }
+
+    // 2) 按混合分取 top_k
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut results: Vec<KbChunkHit> = Vec::new();
+    let mut seen_ids: HashSet<i64> = HashSet::new();
+    for (score, vector_score, keyword_hits, row) in scored.into_iter().take(top_k) {
+        seen_ids.insert(row.chunk_id);
+        let fp = path_cache_get(&mut path_cache, conn, row.folder_id);
+        results.push(to_hit(&row, fp, score, vector_score, keyword_hits));
+    }
+
+    // 3) 向量未就绪 / 命中不足：关键词 LIKE 补足
+    if results.len() < top_k {
+        let all = load_chunks_with_notes(conn, false).map_err(|e| e.to_string())?;
+        let mut like_hits: Vec<(i64, ChunkRow)> = Vec::new();
+        for row in all {
+            if seen_ids.contains(&row.chunk_id) {
+                continue;
+            }
+            let hay = format!("{} {} {}", row.note_title, row.heading, row.content);
+            let hits = count_keyword_hits(&hay, &keywords);
+            if hits > 0 {
+                like_hits.push((hits, row));
+            } else if keywords.is_empty() {
+                // 无关键词时用原始 query 子串兜底
+                let q = query_text.trim();
+                if !q.is_empty() && hay.contains(q) {
+                    like_hits.push((1, row));
+                }
+            }
+        }
+        like_hits.sort_by(|a, b| b.0.cmp(&a.0));
+        for (hits, row) in like_hits {
+            if results.len() >= top_k {
+                break;
+            }
+            seen_ids.insert(row.chunk_id);
+            let fp = path_cache_get(&mut path_cache, conn, row.folder_id);
+            let score = (hits.min(10) as f64) * 0.05;
+            results.push(to_hit(&row, fp, score, 0.0, hits));
+        }
+    }
+
+    Ok(results)
+}
+
 // ---------- kb_chunks / kb_meta CRUD ----------
 
 pub fn clear_all_chunks(conn: &Connection) -> rusqlite::Result<()> {
@@ -761,4 +1070,92 @@ mod tests {
         assert_eq!(count_indexed_notes(&conn).unwrap(), 0);
         assert_eq!(count_notes(&conn).unwrap(), 0);
     }
+
+    #[test]
+    fn extract_keywords_chinese_bigrams() {
+        let kws = extract_keywords("架构设计");
+        assert!(kws.iter().any(|k| k == "架构"));
+        assert!(kws.iter().any(|k| k == "构设"));
+        assert!(kws.iter().any(|k| k == "设计"));
+        assert!(kws.iter().any(|k| k == "架构设计"));
+    }
+
+    #[test]
+    fn extract_keywords_drops_stop_words() {
+        let kws = extract_keywords("这是什么架构");
+        assert!(!kws.iter().any(|k| *k == "这" || *k == "是" || *k == "什么"));
+        assert!(kws.iter().any(|k| k.contains("架构")));
+    }
+
+    #[test]
+    fn folder_path_uncategorized_and_nested() {
+        let conn = crate::db::init_in_memory().unwrap();
+        assert_eq!(folder_path(&conn, None), "未分类");
+        let root = crate::repo::folder::create(&conn, None, "工作", None).unwrap();
+        let child = crate::repo::folder::create(&conn, Some(root.id), "项目A", None).unwrap();
+        assert_eq!(folder_path(&conn, Some(child.id)), "工作 / 项目A");
+    }
+
+    #[test]
+    fn hybrid_search_keyword_fallback_without_vectors() {
+        let conn = crate::db::init_in_memory().unwrap();
+        let n = crate::repo::note::create(&conn, "架构笔记").unwrap();
+        insert_chunk(
+            &conn,
+            n.id,
+            0,
+            "设计",
+            "这里讨论系统架构设计原则",
+            0,
+            "m",
+            None,
+            Some("no embed"),
+        )
+        .unwrap();
+        let hits = hybrid_search(&conn, &[], "架构设计", 3).unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].note_id, n.id);
+        assert!(hits[0].keyword_hits > 0);
+        assert_eq!(hits[0].folder_path, "未分类");
+    }
+
+    #[test]
+    fn hybrid_search_vector_ranks_similar_higher() {
+        let conn = crate::db::init_in_memory().unwrap();
+        let n1 = crate::repo::note::create(&conn, "向量相关").unwrap();
+        let n2 = crate::repo::note::create(&conn, "无关").unwrap();
+        let close = embedding_to_blob(&[1.0f32, 0.0, 0.0]);
+        let far = embedding_to_blob(&[0.0f32, 1.0, 0.0]);
+        insert_chunk(&conn, n1.id, 0, "", "close", 3, "m", Some(&close), None).unwrap();
+        insert_chunk(&conn, n2.id, 0, "", "far", 3, "m", Some(&far), None).unwrap();
+        let hits = hybrid_search(&conn, &[1.0, 0.0, 0.0], "xyz", 3).unwrap();
+        assert!(hits.len() >= 2);
+        assert_eq!(hits[0].note_id, n1.id);
+        assert!(hits[0].vector_score > hits[1].vector_score);
+    }
+
+    #[test]
+    fn hybrid_search_clamps_top_k() {
+        let conn = crate::db::init_in_memory().unwrap();
+        for i in 0..12 {
+            let n = crate::repo::note::create(&conn, &format!("n{i}")).unwrap();
+            insert_chunk(
+                &conn,
+                n.id,
+                0,
+                "",
+                &format!("内容架构{i}"),
+                0,
+                "m",
+                None,
+                Some("e"),
+            )
+            .unwrap();
+        }
+        let hits = hybrid_search(&conn, &[], "架构", 100).unwrap();
+        assert!(hits.len() <= 10);
+        let hits2 = hybrid_search(&conn, &[], "架构", 1).unwrap();
+        assert!(hits2.len() <= 3);
+    }
+
 }

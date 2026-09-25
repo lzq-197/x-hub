@@ -2587,7 +2587,7 @@ static PLATFORM_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 /// - 会话选中的是平台入口名，**或**命中了某个 `platform:*` 条目（老会话存的是具体平台模型名）
 ///   → 走平台轮询；一个平台条目都没有时明确提示开关未开，而不是含糊地回退到别的模型
 /// - 其余 → 精确命中会话选中的自备供应商模型，再回退全局默认（照旧）
-fn pick_chat_model(
+pub(crate) fn pick_chat_model(
     models: &[ChatModelConfig],
     session_model_name: &str,
 ) -> Result<ChatModelConfig, String> {
