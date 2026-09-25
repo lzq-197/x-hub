@@ -237,10 +237,13 @@ pub struct AppConfig {
     /// （笔记本发热治理，见 FloatingBallWindow 的 rings-idle / IDLE_FPS）
     #[serde(default)]
     pub floating_ball_idle_spin: bool,
+    /// 知识库嵌入 Base URL（只经 `save_kb_embed_config` 写盘，见 `BACKEND_MANAGED_FIELDS`）
     #[serde(default = "default_kb_embed_base")]
     pub kb_embed_base_url: String,
+    /// 知识库嵌入模型名（只经 `save_kb_embed_config` 写盘）
     #[serde(default = "default_kb_embed_model")]
     pub kb_embed_model: String,
+    /// 知识库检索 Top-K（3–10，只经 `save_kb_embed_config` 写盘）
     #[serde(default = "default_kb_top_k")]
     pub kb_top_k: i64,
 }
@@ -564,6 +567,10 @@ const BACKEND_MANAGED_FIELDS: &[&str] = &[
     "skill_roots",
     // 「跳过此版本」：只经 skip_update_version 变更
     "skipped_update_version",
+    // 知识库嵌入：只经 save_kb_embed_config 变更（API Key 走钥匙串，不在此列）
+    "kb_embed_base_url",
+    "kb_embed_model",
+    "kb_top_k",
     // 已废弃的两个端点字段（v0.6.1）：真相源是内置常量，只由 migrate_legacy_endpoints 归一
     "market_endpoint",
     "update_endpoint",
@@ -596,6 +603,10 @@ pub fn merge_disk_authoritative(merged: &mut AppConfig, disk: &AppConfig) {
     merged.update_endpoint = disk.update_endpoint.clone();
     merged.skill_roots = disk.skill_roots.clone();
     merged.skipped_update_version = disk.skipped_update_version.clone();
+    // 知识库嵌入：只经 save_kb_embed_config 写盘，前端启动快照不得冲掉
+    merged.kb_embed_base_url = disk.kb_embed_base_url.clone();
+    merged.kb_embed_model = disk.kb_embed_model.clone();
+    merged.kb_top_k = disk.kb_top_k;
 }
 
 pub fn save(config: &AppConfig) -> Result<(), String> {
@@ -795,6 +806,10 @@ mod tests {
             dev_mode_enabled: true,
             skill_roots: vec!["E:\\skills-custom".to_string()],
             skipped_update_version: "9.9.9".to_string(),
+            // 非默认值：否则缺字段补缺后仍等于磁盘，测不出合并是否生效
+            kb_embed_base_url: "http://127.0.0.1:9999/v1".to_string(),
+            kb_embed_model: "disk-embed-model".to_string(),
+            kb_top_k: 9,
             ..AppConfig::default()
         }
     }
@@ -862,6 +877,9 @@ mod tests {
         assert_eq!(merged.dev_mode_enabled, disk.dev_mode_enabled);
         assert_eq!(merged.skill_roots, disk.skill_roots);
         assert_eq!(merged.skipped_update_version, disk.skipped_update_version);
+        assert_eq!(merged.kb_embed_base_url, disk.kb_embed_base_url);
+        assert_eq!(merged.kb_embed_model, disk.kb_embed_model);
+        assert_eq!(merged.kb_top_k, disk.kb_top_k);
     }
 
     /// 清单漏登就是这条红：任何登记在案的名字都必须是 `AppConfig` 真实存在的字段，

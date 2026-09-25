@@ -65,6 +65,7 @@ async fn embed_once(cfg: &EmbedConfig, inputs: &[String]) -> Result<Vec<Vec<f32>
     let url = embeddings_url(&cfg.base_url);
     crate::credentials::validate_endpoint(&url)?;
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;

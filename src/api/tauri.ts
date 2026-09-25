@@ -211,8 +211,8 @@ export interface WindowState {
  * ⚠️ 判据：**这个类型里有没有某个字段，都不代表前端说了算**。凡是在后端
  * `config.rs::BACKEND_MANAGED_FIELDS` 里登记的字段，一律以磁盘为准（合并实现见
  * `config.rs::merge_disk_authoritative`，三条回归测试守着）。两种情形**都会**覆盖磁盘：
- *   - 前端认识它（如 `chat_models`、`chat_window_*`、`floating_ball_*`、`skipped_update_version`）
- *     → 提交时带的是**启动快照**里的旧值；
+ *   - 前端认识它（如 `chat_models`、`chat_window_*`、`floating_ball_*`、`skipped_update_version`、
+ *     `kb_embed_*` / `kb_top_k`）→ 提交时带的是**启动快照**里的旧值；
  *   - 前端不认识它（如 `dev_extensions`、`dev_mode_enabled`、`skill_roots`）→ 序列化后整份提交，
  *     反序列化时按 `AppConfig::default()` 的**同名字段值**补缺（容器级 `#[serde(default)]`），
  *     照样把磁盘值冲掉（`skill_roots` 那次事故就是这么发生的）。
@@ -220,6 +220,11 @@ export interface WindowState {
  *
  * 新增「只由后端命令写盘」的字段时：连同 `merge_disk_authoritative`、`BACKEND_MANAGED_FIELDS`
  * 一起改（清单见 `AGENTS.md` 的配置约定）；确实需要前端读写某个字段，也请连同合并逻辑一起改。
+ *
+ * 后端管理字段清单（须与 `config.rs::BACKEND_MANAGED_FIELDS` 对齐）：`chat_models`、
+ * `chat_window_*`、`floating_ball_*`、`dev_extensions`/`dev_mode_enabled`、`skill_roots`、
+ * `skipped_update_version`、`kb_embed_base_url`/`kb_embed_model`/`kb_top_k`（经
+ * `save_kb_embed_config`）、已废弃 `market_endpoint`/`update_endpoint`。
  */
 export interface AppConfig {
   theme_mode: string // 'light' | 'dark' | 'system'
@@ -320,6 +325,10 @@ export interface AppConfig {
   floating_ball_y: number | null
   /** 悬浮球静止态保持转动（炫酷模式，默认关）：开启 = 陀螺环常转 + canvas 满帧（旧版行为，更耗电） */
   floating_ball_idle_spin: boolean
+  /**
+   * 知识库嵌入配置（后端管理，经 `save_kb_embed_config` 写盘；
+   * `save_config` 合并时以磁盘为准，见 `BACKEND_MANAGED_FIELDS`）
+   */
   kb_embed_base_url?: string
   kb_embed_model?: string
   kb_top_k?: number
