@@ -1,19 +1,234 @@
-//! Markdown 导入 + 索引 stub（本段无 kb_chunks / 嵌入）。
+//! Markdown 导入 + 知识库索引流水线（分块 / 嵌入 / kb_meta）。
 
-use crate::models::ImportResult;
-use crate::repo::{folder, note};
+use crate::commands::DbState;
+use crate::models::{ImportResult, IndexProgressEvent, KbStatus};
+use crate::repo::{folder, knowledge as kb_repo, note};
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Manager, State};
 
 const MAX_IMPORT_FILES: usize = 2000;
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_WALK_DEPTH: usize = 8;
 const MAX_ERRORS: usize = 20;
 
-/// 索引 stub：立即成功，不写库、不访问网络。
-pub fn index_note_stub(_note_id: i64) -> Result<(), String> {
+static IS_INDEXING: AtomicBool = AtomicBool::new(false);
+
+struct IndexingGuard;
+
+impl Drop for IndexingGuard {
+    fn drop(&mut self) {
+        IS_INDEXING.store(false, Ordering::SeqCst);
+    }
+}
+
+pub fn embed_config_from_disk() -> crate::embed::EmbedConfig {
+    let cfg = crate::config::load();
+    crate::embed::EmbedConfig {
+        base_url: cfg.kb_embed_base_url,
+        model: cfg.kb_embed_model,
+        api_key: crate::embed::get_embed_api_key(),
+    }
+}
+
+/// 增量索引：重建进行中时直接跳过。
+pub async fn index_note_async(app: &AppHandle, note_id: i64) -> Result<(), String> {
+    index_note_inner(app, note_id, false).await
+}
+
+/// 重建路径：忽略 IS_INDEXING 跳过逻辑。
+pub async fn index_note_force(app: &AppHandle, note_id: i64) -> Result<(), String> {
+    index_note_inner(app, note_id, true).await
+}
+
+async fn index_note_inner(app: &AppHandle, note_id: i64, force: bool) -> Result<(), String> {
+    if !force && IS_INDEXING.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let content = {
+        let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        match note::get(&conn, note_id) {
+            Ok(n) => n.content,
+            Err(_) => return Ok(()),
+        }
+    };
+
+    let chunks = kb_repo::chunk_markdown(&content);
+    let cfg = embed_config_from_disk();
+
+    if chunks.is_empty() {
+        let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        kb_repo::delete_chunks_for_note(&conn, note_id).map_err(|e| e.to_string())?;
+        kb_repo::refresh_meta_counts(&conn, &cfg.model).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let inputs: Vec<String> = chunks
+        .iter()
+        .map(|c| {
+            if c.heading.is_empty() {
+                c.content.clone()
+            } else {
+                format!("{}\n{}", c.heading, c.content)
+            }
+        })
+        .collect();
+
+    let embed_result = crate::embed::embed_batch(&cfg, &inputs).await;
+
+    let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    match &embed_result {
+        Ok(vecs) => {
+            let blobs: Vec<Option<Vec<u8>>> = (0..chunks.len())
+                .map(|i| vecs.get(i).map(|v| kb_repo::embedding_to_blob(v)))
+                .collect();
+            let row_refs: Vec<(i64, &str, &str, i64, &str, Option<&[u8]>, Option<&str>)> = chunks
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let emb = blobs[i].as_deref();
+                    let dim = vecs.get(i).map(|v| v.len() as i64).unwrap_or(0);
+                    (
+                        i as i64,
+                        c.heading.as_str(),
+                        c.content.as_str(),
+                        dim,
+                        cfg.model.as_str(),
+                        emb,
+                        None,
+                    )
+                })
+                .collect();
+            kb_repo::replace_note_chunks(&conn, note_id, &row_refs).map_err(|e| e.to_string())?;
+        }
+        Err(e) => {
+            log::warn!("kb embed note {note_id}: {e}");
+            let err_msg = e.as_str();
+            let row_refs: Vec<(i64, &str, &str, i64, &str, Option<&[u8]>, Option<&str>)> = chunks
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    (
+                        i as i64,
+                        c.heading.as_str(),
+                        c.content.as_str(),
+                        0,
+                        cfg.model.as_str(),
+                        None,
+                        Some(err_msg),
+                    )
+                })
+                .collect();
+            kb_repo::replace_note_chunks(&conn, note_id, &row_refs).map_err(|e| e.to_string())?;
+        }
+    }
+
+    kb_repo::refresh_meta_counts(&conn, &cfg.model).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn kb_index_note(app: AppHandle, note_id: i64) -> Result<(), String> {
+    index_note_async(&app, note_id).await
+}
+
+#[tauri::command]
+pub async fn kb_rebuild_index(
+    app: AppHandle,
+    on_progress: tauri::ipc::Channel<IndexProgressEvent>,
+) -> Result<(), String> {
+    if IS_INDEXING.swap(true, Ordering::SeqCst) {
+        return Err("索引任务进行中".into());
+    }
+    let _guard = IndexingGuard;
+
+    let cfg = embed_config_from_disk();
+
+    let note_ids: Vec<i64> = {
+        let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        kb_repo::set_meta_indexing(&conn).map_err(|e| e.to_string())?;
+        kb_repo::clear_all_chunks(&conn).map_err(|e| e.to_string())?;
+        let notes = note::list_meta(&conn).map_err(|e| e.to_string())?;
+        notes.into_iter().map(|n| n.id).collect()
+    };
+
+    let total = note_ids.len() as i64;
+    let _ = on_progress.send(IndexProgressEvent {
+        stage: "indexing".into(),
+        done: 0,
+        total,
+    });
+
+    for (i, id) in note_ids.iter().enumerate() {
+        if let Err(e) = index_note_force(&app, *id).await {
+            let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+            let conn = state.0.lock().map_err(|e| e.to_string())?;
+            let msg = format!("索引笔记 {id} 失败: {e}");
+            let _ = kb_repo::set_meta_error(&conn, &msg);
+            return Err(msg);
+        }
+        let done = (i + 1) as i64;
+        let progress = if total > 0 {
+            ((done * 100) / total).min(99)
+        } else {
+            100
+        };
+        {
+            let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+            let conn = state.0.lock().map_err(|e| e.to_string())?;
+            kb_repo::set_meta_progress(&conn, progress).map_err(|e| e.to_string())?;
+        }
+        let _ = on_progress.send(IndexProgressEvent {
+            stage: "indexing".into(),
+            done,
+            total,
+        });
+    }
+
+    {
+        let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let indexed = kb_repo::count_indexed_notes(&conn).map_err(|e| e.to_string())?;
+        let chunks = kb_repo::count_chunks(&conn).map_err(|e| e.to_string())?;
+        kb_repo::set_meta_done(&conn, &cfg.model, indexed, chunks).map_err(|e| e.to_string())?;
+    }
+
+    let _ = on_progress.send(IndexProgressEvent {
+        stage: "done".into(),
+        done: total,
+        total,
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn kb_get_status(state: State<'_, DbState>) -> Result<KbStatus, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let (status, progress, model, indexed_notes, chunk_count, last_indexed_at, error) =
+        kb_repo::get_meta(&conn).map_err(|e| e.to_string())?;
+    let total_notes = kb_repo::count_notes(&conn).map_err(|e| e.to_string())?;
+    let cfg = crate::config::load();
+    let embedding_ready =
+        !cfg.kb_embed_base_url.trim().is_empty() && !cfg.kb_embed_model.trim().is_empty();
+    Ok(KbStatus {
+        status,
+        indexed_notes,
+        chunk_count,
+        model,
+        last_indexed_at,
+        error,
+        progress,
+        total_notes,
+        embedding_ready,
+    })
 }
 
 /// 扫描结果（无 DB）：仅路径列表；读文件见 [`load_prepared`]。
@@ -508,11 +723,6 @@ mod tests {
         assert_eq!(r.imported, 1);
         assert!(r.skipped >= 1);
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn index_note_stub_ok() {
-        assert!(index_note_stub(1).is_ok());
     }
 
     #[test]

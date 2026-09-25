@@ -316,7 +316,7 @@ pub fn list_notes(state: State<'_, DbState>) -> Result<Vec<Note>, String> {
     note::list_meta(&conn).map_err(err_str)
 }
 
-// ---------- 速记文件夹 / Markdown 导入 / 索引 stub ----------
+// ---------- 速记文件夹 / Markdown 导入 ----------
 
 #[tauri::command]
 pub fn list_note_folders(state: State<'_, DbState>) -> Result<Vec<NoteFolder>, String> {
@@ -441,12 +441,6 @@ pub fn import_markdown(
         result.total
     );
     Ok(result)
-}
-
-/// 索引 stub：无副作用，供导入/保存调用点预留（RAG 段替换实现）
-#[tauri::command]
-pub fn kb_index_note(_note_id: i64) -> Result<(), String> {
-    crate::knowledge::index_note_stub(_note_id)
 }
 
 // ---------- 待办清单 ----------

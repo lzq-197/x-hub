@@ -1,3 +1,5 @@
+use rusqlite::{params, Connection};
+
 const TARGET_CHUNK_LEN: usize = 500;
 const MAX_CHUNK_LEN: usize = 1000;
 const MAX_HEADING_LEVELS: usize = 4;
@@ -384,6 +386,182 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
+// ---------- kb_chunks / kb_meta CRUD ----------
+
+pub fn clear_all_chunks(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM kb_chunks", [])?;
+    Ok(())
+}
+
+pub fn delete_chunks_for_note(conn: &Connection, note_id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM kb_chunks WHERE note_id = ?1", params![note_id])?;
+    Ok(())
+}
+
+pub fn insert_chunk(
+    conn: &Connection,
+    note_id: i64,
+    idx: i64,
+    heading: &str,
+    content: &str,
+    dim: i64,
+    model: &str,
+    embedding: Option<&[u8]>,
+    embed_error: Option<&str>,
+) -> rusqlite::Result<()> {
+    let token_count = content.chars().count() as i64;
+    conn.execute(
+        "INSERT INTO kb_chunks (
+            note_id, chunk_index, heading, content, token_count,
+            dim, model, embedding, embed_error
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            note_id,
+            idx,
+            heading,
+            content,
+            token_count,
+            dim,
+            model,
+            embedding,
+            embed_error
+        ],
+    )?;
+    Ok(())
+}
+
+/// 事务内替换某笔记的全部片段。
+pub fn replace_note_chunks(
+    conn: &Connection,
+    note_id: i64,
+    rows: &[(
+        i64,          // chunk_index
+        &str,         // heading
+        &str,         // content
+        i64,          // dim
+        &str,         // model
+        Option<&[u8]>, // embedding
+        Option<&str>, // embed_error
+    )],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    delete_chunks_for_note(&tx, note_id)?;
+    for (idx, heading, content, dim, model, embedding, embed_error) in rows {
+        insert_chunk(
+            &tx,
+            note_id,
+            *idx,
+            heading,
+            content,
+            *dim,
+            model,
+            *embedding,
+            *embed_error,
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// (status, progress, model, indexed_notes, chunk_count, last_indexed_at, error)
+pub fn get_meta(
+    conn: &Connection,
+) -> rusqlite::Result<(String, i64, String, i64, i64, Option<String>, Option<String>)> {
+    conn.query_row(
+        "SELECT status, progress, model, indexed_notes, chunk_count, last_indexed_at, error
+         FROM kb_meta WHERE id = 1",
+        [],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        },
+    )
+}
+
+pub fn set_meta_indexing(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE kb_meta SET status = 'indexing', progress = 0, error = NULL WHERE id = 1",
+        [],
+    )?;
+    Ok(())
+}
+
+pub fn set_meta_done(
+    conn: &Connection,
+    model: &str,
+    indexed_notes: i64,
+    chunk_count: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE kb_meta SET
+            status = 'done',
+            progress = 100,
+            error = NULL,
+            model = ?1,
+            indexed_notes = ?2,
+            chunk_count = ?3,
+            last_indexed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+         WHERE id = 1",
+        params![model, indexed_notes, chunk_count],
+    )?;
+    Ok(())
+}
+
+pub fn set_meta_error(conn: &Connection, err: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE kb_meta SET status = 'error', error = ?1 WHERE id = 1",
+        params![err],
+    )?;
+    Ok(())
+}
+
+pub fn set_meta_progress(conn: &Connection, progress: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE kb_meta SET progress = ?1 WHERE id = 1",
+        params![progress],
+    )?;
+    Ok(())
+}
+
+/// 增量索引后刷新计数；若当前非 indexing 则置为 done。
+pub fn refresh_meta_counts(conn: &Connection, model: &str) -> rusqlite::Result<()> {
+    let indexed = count_indexed_notes(conn)?;
+    let chunks = count_chunks(conn)?;
+    let (status, _, _, _, _, _, _) = get_meta(conn)?;
+    if status == "indexing" {
+        conn.execute(
+            "UPDATE kb_meta SET indexed_notes = ?1, chunk_count = ?2 WHERE id = 1",
+            params![indexed, chunks],
+        )?;
+    } else {
+        set_meta_done(conn, model, indexed, chunks)?;
+    }
+    Ok(())
+}
+
+pub fn count_chunks(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM kb_chunks", [], |r| r.get(0))
+}
+
+pub fn count_indexed_notes(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(DISTINCT note_id) FROM kb_chunks WHERE embedding IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )
+}
+
+pub fn count_notes(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +637,41 @@ mod tests {
     #[test]
     fn blob_to_embedding_rejects_bad_length() {
         assert!(blob_to_embedding(&[0u8, 1, 2]).is_err());
+    }
+
+    #[test]
+    fn replace_chunks_roundtrip_without_embed() {
+        let conn = crate::db::init_in_memory().unwrap();
+        let n = crate::repo::note::create(&conn, "t").unwrap();
+        delete_chunks_for_note(&conn, n.id).unwrap();
+        insert_chunk(
+            &conn,
+            n.id,
+            0,
+            "H",
+            "body",
+            0,
+            "m",
+            None,
+            Some("no embed"),
+        )
+        .unwrap();
+        assert_eq!(count_chunks(&conn).unwrap(), 1);
+
+        replace_note_chunks(
+            &conn,
+            n.id,
+            &[(1, "H2", "body2", 0, "m", None, Some("still no"))],
+        )
+        .unwrap();
+        assert_eq!(count_chunks(&conn).unwrap(), 1);
+        let idx: i64 = conn
+            .query_row(
+                "SELECT chunk_index FROM kb_chunks WHERE note_id = ?1",
+                params![n.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1);
     }
 }

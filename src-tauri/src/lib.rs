@@ -323,6 +323,7 @@ pub fn run() {
             let conn = init_database()?;
             fix_icon_paths(&conn);
             app.manage(DbState(std::sync::Mutex::new(conn)));
+            crate::kb_hooks::init(app.handle().clone());
             app.manage(clipboard::ClipboardState::default());
             app.manage(service::ServiceState::default());
             // 开发扩展目录映射（「我的扩展」登记；扩展协议与扫描按它解析源码目录）
@@ -529,7 +530,9 @@ pub fn run() {
             commands::delete_note_folder,
             commands::set_note_folder,
             commands::import_markdown,
-            commands::kb_index_note,
+            knowledge::kb_index_note,
+            knowledge::kb_rebuild_index,
+            knowledge::kb_get_status,
             commands::list_todos,
             commands::create_todo,
             commands::toggle_todo,
