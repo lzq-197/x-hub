@@ -517,6 +517,39 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS kb_chunks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+          chunk_index INTEGER NOT NULL DEFAULT 0,
+          heading TEXT NOT NULL DEFAULT '',
+          content TEXT NOT NULL,
+          token_count INTEGER NOT NULL DEFAULT 0,
+          dim INTEGER NOT NULL DEFAULT 0,
+          model TEXT NOT NULL DEFAULT '',
+          embedding BLOB,
+          embed_error TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_kb_chunks_note ON kb_chunks(note_id);
+        CREATE INDEX IF NOT EXISTS idx_kb_chunks_model ON kb_chunks(model, dim);
+
+        CREATE TABLE IF NOT EXISTS kb_meta (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          model TEXT NOT NULL DEFAULT '',
+          indexed_notes INTEGER NOT NULL DEFAULT 0,
+          chunk_count INTEGER NOT NULL DEFAULT 0,
+          last_indexed_at TEXT,
+          status TEXT NOT NULL DEFAULT 'idle',
+          error TEXT,
+          progress INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO kb_meta (id) VALUES (1);
+        "#,
+    )?;
+
     Ok(())
 }
 
@@ -893,5 +926,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn kb_chunks_and_meta_schema_exist() {
+        let conn = crate::db::init_in_memory().unwrap();
+        assert!(table_exists(&conn, "kb_chunks"));
+        assert!(table_exists(&conn, "kb_meta"));
+        let status: String = conn
+            .query_row("SELECT status FROM kb_meta WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "idle");
     }
 }

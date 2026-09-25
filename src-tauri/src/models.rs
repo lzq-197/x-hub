@@ -461,3 +461,72 @@ pub struct ChatModelConfig {
     #[serde(default)]
     pub provider_name: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbChunkHit {
+    pub chunk_id: i64,
+    pub note_id: i64,
+    pub note_title: String,
+    pub folder_path: String,
+    pub heading: String,
+    pub content: String,
+    pub score: f64,
+    pub vector_score: f64,
+    pub keyword_hits: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Citation {
+    pub index: i64,
+    pub note_id: i64,
+    pub note_title: String,
+    pub folder_path: String,
+    pub heading: String,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbStatus {
+    pub status: String,
+    pub indexed_notes: i64,
+    pub chunk_count: i64,
+    pub model: String,
+    pub last_indexed_at: Option<String>,
+    pub error: Option<String>,
+    pub progress: i64,
+    pub total_notes: i64,
+    pub embedding_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum KbAskEvent {
+    Chunk { content: String },
+    Done {
+        answer: String,
+        citations: Vec<Citation>,
+        kb_status: KbStatus,
+    },
+    Error { message: String, partial: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexProgressEvent {
+    pub stage: String,
+    pub done: i64,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbEmbedConfigView {
+    pub base_url: String,
+    pub model: String,
+    pub has_api_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbedTestResult {
+    pub ok: bool,
+    pub message: String,
+    pub dim: Option<i64>,
+}

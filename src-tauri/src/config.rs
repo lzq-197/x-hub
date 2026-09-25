@@ -237,6 +237,12 @@ pub struct AppConfig {
     /// （笔记本发热治理，见 FloatingBallWindow 的 rings-idle / IDLE_FPS）
     #[serde(default)]
     pub floating_ball_idle_spin: bool,
+    #[serde(default = "default_kb_embed_base")]
+    pub kb_embed_base_url: String,
+    #[serde(default = "default_kb_embed_model")]
+    pub kb_embed_model: String,
+    #[serde(default = "default_kb_top_k")]
+    pub kb_top_k: i64,
 }
 
 fn one() -> f64 {
@@ -311,6 +317,18 @@ pub fn market_registry_url() -> String {
 /// 应用升级清单地址（平台服务端接口，`.sig` 为同级 `{url}.sig`）。
 pub fn update_manifest_url() -> String {
     format!("{DEFAULT_SERVER_URL}{UPDATE_MANIFEST_PATH}")
+}
+
+fn default_kb_embed_base() -> String {
+    "http://127.0.0.1:11434/v1".into()
+}
+
+fn default_kb_embed_model() -> String {
+    "bge-m3".into()
+}
+
+fn default_kb_top_k() -> i64 {
+    6
 }
 
 fn default_update_interval_hours() -> u64 {
@@ -403,6 +421,9 @@ impl Default for AppConfig {
             floating_ball_x: None,
             floating_ball_y: None,
             floating_ball_idle_spin: false,
+            kb_embed_base_url: default_kb_embed_base(),
+            kb_embed_model: default_kb_embed_model(),
+            kb_top_k: default_kb_top_k(),
         }
     }
 }

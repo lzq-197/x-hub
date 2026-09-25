@@ -320,6 +320,9 @@ export interface AppConfig {
   floating_ball_y: number | null
   /** 悬浮球静止态保持转动（炫酷模式，默认关）：开启 = 陀螺环常转 + canvas 满帧（旧版行为，更耗电） */
   floating_ball_idle_spin: boolean
+  kb_embed_base_url?: string
+  kb_embed_model?: string
+  kb_top_k?: number
 }
 
 export interface AppInfo {
