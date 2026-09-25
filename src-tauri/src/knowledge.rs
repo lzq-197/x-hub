@@ -4,6 +4,7 @@ use crate::commands::DbState;
 use crate::models::{ImportResult, IndexProgressEvent, KbStatus};
 use crate::repo::{folder, knowledge as kb_repo, note};
 use rusqlite::Connection;
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +22,42 @@ struct IndexingGuard;
 impl Drop for IndexingGuard {
     fn drop(&mut self) {
         IS_INDEXING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 重建未正常收尾时，若 `kb_meta` 仍停在 `indexing`，落成 `error`。
+/// 与 [`IndexingGuard`] 分开：后者只清 `IS_INDEXING`。
+struct RebuildMetaGuard {
+    app: AppHandle,
+    /// 已调用 `set_meta_done` / 显式 `set_meta_error` 等终态时置 true。
+    finished: Cell<bool>,
+}
+
+impl RebuildMetaGuard {
+    fn new(app: AppHandle) -> Self {
+        Self {
+            app,
+            finished: Cell::new(false),
+        }
+    }
+
+    fn mark_finished(&self) {
+        self.finished.set(true);
+    }
+}
+
+impl Drop for RebuildMetaGuard {
+    fn drop(&mut self) {
+        if self.finished.get() {
+            return;
+        }
+        let Some(state) = self.app.try_state::<DbState>() else {
+            return;
+        };
+        let Ok(conn) = state.0.lock() else {
+            return;
+        };
+        let _ = kb_repo::clear_stuck_indexing(&conn, "索引失败（任务中断）");
     }
 }
 
@@ -148,6 +185,7 @@ pub async fn kb_rebuild_index(
         return Err("索引任务进行中".into());
     }
     let _guard = IndexingGuard;
+    let meta_guard = RebuildMetaGuard::new(app.clone());
 
     let cfg = embed_config_from_disk();
 
@@ -173,6 +211,7 @@ pub async fn kb_rebuild_index(
             let conn = state.0.lock().map_err(|e| e.to_string())?;
             let msg = format!("索引笔记 {id} 失败: {e}");
             let _ = kb_repo::set_meta_error(&conn, &msg);
+            meta_guard.mark_finished();
             return Err(msg);
         }
         let done = (i + 1) as i64;
@@ -196,9 +235,19 @@ pub async fn kb_rebuild_index(
     {
         let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
         let conn = state.0.lock().map_err(|e| e.to_string())?;
-        let indexed = kb_repo::count_indexed_notes(&conn).map_err(|e| e.to_string())?;
-        let chunks = kb_repo::count_chunks(&conn).map_err(|e| e.to_string())?;
-        kb_repo::set_meta_done(&conn, &cfg.model, indexed, chunks).map_err(|e| e.to_string())?;
+        match kb_repo::finalize_rebuild_meta(&conn, &cfg.model) {
+            Ok(()) => meta_guard.mark_finished(),
+            Err(msg) => {
+                // 全失败已写 error；DB 失败仍可能停在 indexing → 留给 Drop
+                if kb_repo::get_meta(&conn)
+                    .map(|(s, ..)| s != "indexing")
+                    .unwrap_or(false)
+                {
+                    meta_guard.mark_finished();
+                }
+                return Err(msg);
+            }
+        }
     }
 
     let _ = on_progress.send(IndexProgressEvent {
@@ -212,8 +261,11 @@ pub async fn kb_rebuild_index(
 #[tauri::command]
 pub fn kb_get_status(state: State<'_, DbState>) -> Result<KbStatus, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let (status, progress, model, indexed_notes, chunk_count, last_indexed_at, error) =
+    let (status, progress, model, _stale_indexed, _stale_chunks, last_indexed_at, error) =
         kb_repo::get_meta(&conn).map_err(|e| e.to_string())?;
+    // 计数以 live 为准，避免删笔记后 CASCADE 清 chunk 但 meta 列滞后
+    let indexed_notes = kb_repo::count_indexed_notes(&conn).map_err(|e| e.to_string())?;
+    let chunk_count = kb_repo::count_chunks(&conn).map_err(|e| e.to_string())?;
     let total_notes = kb_repo::count_notes(&conn).map_err(|e| e.to_string())?;
     let cfg = crate::config::load();
     let embedding_ready =

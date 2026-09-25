@@ -530,6 +530,36 @@ pub fn set_meta_progress(conn: &Connection, progress: i64) -> rusqlite::Result<(
     Ok(())
 }
 
+/// 若仍停在 `indexing`，落成 `error`（重建中途 `?` 失败 / Drop 兜底用）。
+/// 返回是否实际写入了 error。
+pub fn clear_stuck_indexing(conn: &Connection, err: &str) -> rusqlite::Result<bool> {
+    let (status, _, _, _, _, _, _) = get_meta(conn)?;
+    if status == "indexing" {
+        set_meta_error(conn, err)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// 全量重建收尾：有片段但无一成功嵌入 → error；否则 done。
+/// `Err(String)` 表示应向上返回的业务错误（meta 已写好）。
+pub fn finalize_rebuild_meta(conn: &Connection, model: &str) -> Result<(), String> {
+    let indexed = count_indexed_notes(conn).map_err(|e| e.to_string())?;
+    let chunks = count_chunks(conn).map_err(|e| e.to_string())?;
+    if chunks > 0 && indexed == 0 {
+        let msg = "嵌入全部失败，请检查 Ollama / 嵌入配置";
+        set_meta_error(conn, msg).map_err(|e| e.to_string())?;
+        let _ = conn.execute(
+            "UPDATE kb_meta SET indexed_notes = ?1, chunk_count = ?2, model = ?3 WHERE id = 1",
+            params![indexed, chunks, model],
+        );
+        return Err(msg.into());
+    }
+    set_meta_done(conn, model, indexed, chunks).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 增量索引后刷新计数；若当前非 indexing 则置为 done。
 pub fn refresh_meta_counts(conn: &Connection, model: &str) -> rusqlite::Result<()> {
     let indexed = count_indexed_notes(conn)?;
@@ -673,5 +703,62 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn clear_stuck_indexing_only_when_indexing() {
+        let conn = crate::db::init_in_memory().unwrap();
+        set_meta_indexing(&conn).unwrap();
+        assert!(clear_stuck_indexing(&conn, "索引失败（任务中断）").unwrap());
+        let (status, _, _, _, _, _, err) = get_meta(&conn).unwrap();
+        assert_eq!(status, "error");
+        assert_eq!(err.as_deref(), Some("索引失败（任务中断）"));
+
+        // 已是 error 时不再覆盖
+        assert!(!clear_stuck_indexing(&conn, "另一条").unwrap());
+        let (_, _, _, _, _, _, err2) = get_meta(&conn).unwrap();
+        assert_eq!(err2.as_deref(), Some("索引失败（任务中断）"));
+    }
+
+    #[test]
+    fn finalize_rebuild_all_embed_failed_sets_error() {
+        let conn = crate::db::init_in_memory().unwrap();
+        let n = crate::repo::note::create(&conn, "t").unwrap();
+        insert_chunk(&conn, n.id, 0, "", "body", 0, "m", None, Some("boom")).unwrap();
+        let err = finalize_rebuild_meta(&conn, "m").unwrap_err();
+        assert!(err.contains("嵌入全部失败"));
+        let (status, _, _, _, _, _, e) = get_meta(&conn).unwrap();
+        assert_eq!(status, "error");
+        assert_eq!(e.as_deref(), Some("嵌入全部失败，请检查 Ollama / 嵌入配置"));
+    }
+
+    #[test]
+    fn finalize_rebuild_empty_kb_is_done() {
+        let conn = crate::db::init_in_memory().unwrap();
+        finalize_rebuild_meta(&conn, "m").unwrap();
+        let (status, progress, _, indexed, chunks, _, err) = get_meta(&conn).unwrap();
+        assert_eq!(status, "done");
+        assert_eq!(progress, 100);
+        assert_eq!(indexed, 0);
+        assert_eq!(chunks, 0);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn live_counts_survive_stale_meta_after_note_delete() {
+        let conn = crate::db::init_in_memory().unwrap();
+        let n = crate::repo::note::create(&conn, "t").unwrap();
+        let blob = embedding_to_blob(&[1.0f32, 0.0]);
+        insert_chunk(&conn, n.id, 0, "", "body", 2, "m", Some(&blob), None).unwrap();
+        set_meta_done(&conn, "m", 1, 1).unwrap();
+
+        crate::repo::note::delete(&conn, n.id).unwrap();
+        // CASCADE 清了 chunks，但 meta 列仍是旧值
+        let (_, _, _, meta_indexed, meta_chunks, _, _) = get_meta(&conn).unwrap();
+        assert_eq!(meta_indexed, 1);
+        assert_eq!(meta_chunks, 1);
+        assert_eq!(count_chunks(&conn).unwrap(), 0);
+        assert_eq!(count_indexed_notes(&conn).unwrap(), 0);
+        assert_eq!(count_notes(&conn).unwrap(), 0);
     }
 }
