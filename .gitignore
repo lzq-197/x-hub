@@ -47,6 +47,9 @@ x-hub-*.zip
 dist-market/
 dist-release/
 
+# Local desktop channel builds (build:prod / build:release)
+dist-desktop/
+
 # Signing secrets (NEVER commit)
 .x-hub-signing/
 market.key

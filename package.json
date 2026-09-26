@@ -14,6 +14,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "build:prod": "node scripts/desktop-build.mjs prod",
+    "build:release": "node scripts/desktop-build.mjs release",
     "tauri:test": "pwsh -NoProfile -File scripts/cargo-test.ps1"
   },
   "dependencies": {
