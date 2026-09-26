@@ -7,6 +7,9 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Local pnpm lock (repo uses package-lock.json / npm); keep out of dirty-tree checks
+pnpm-lock.yaml
+
 node_modules
 dist
 dist-ssr
