@@ -274,24 +274,25 @@ fn strip_markdown_line(line: &str) -> String {
 fn strip_inline_links(s: &str) -> String {
     let mut out = String::new();
     let mut i = 0;
-    let bytes = s.as_bytes();
-    while i < bytes.len() {
-        if bytes[i] == b'!' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+    while i < s.len() {
+        let rest = &s[i..];
+        if rest.starts_with("![") {
             if let Some((alt, next)) = parse_link_text(&s[i + 2..]) {
                 out.push_str(&alt);
                 i += 2 + next;
                 continue;
             }
         }
-        if bytes[i] == b'[' {
+        if rest.starts_with('[') {
             if let Some((label, next)) = parse_link_text(&s[i + 1..]) {
                 out.push_str(&label);
                 i += 1 + next;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        let ch = rest.chars().next().expect("i on char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -321,31 +322,33 @@ fn parse_link_text(s: &str) -> Option<(String, usize)> {
 fn strip_emphasis(s: &str) -> String {
     let mut out = String::new();
     let mut i = 0;
-    let bytes = s.as_bytes();
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'*' {
+    while i < s.len() {
+        let rest = &s[i..];
+        if rest.starts_with("**") {
             if let Some(end) = s[i + 2..].find("**") {
                 out.push_str(&s[i + 2..i + 2 + end]);
                 i += 4 + end;
                 continue;
             }
         }
-        if i + 1 < bytes.len() && bytes[i] == b'~' && bytes[i + 1] == b'~' {
+        if rest.starts_with("~~") {
             if let Some(end) = s[i + 2..].find("~~") {
                 out.push_str(&s[i + 2..i + 2 + end]);
                 i += 4 + end;
                 continue;
             }
         }
-        if bytes[i] == b'*' || bytes[i] == b'_' {
-            if let Some(end) = s[i + 1..].find(bytes[i] as char) {
-                out.push_str(&s[i + 1..i + 1 + end]);
-                i += 2 + end;
+        let ch = rest.chars().next().expect("i on char boundary");
+        if ch == '*' || ch == '_' {
+            let mark_len = ch.len_utf8();
+            if let Some(end) = s[i + mark_len..].find(ch) {
+                out.push_str(&s[i + mark_len..i + mark_len + end]);
+                i += mark_len * 2 + end;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -957,6 +960,42 @@ mod tests {
         assert!(!chunks[0].content.contains("**"));
         assert!(chunks[0].content.contains("link"));
         assert!(!chunks[0].content.contains("http://"));
+    }
+
+    #[test]
+    fn chunk_markdown_preserves_chinese() {
+        let md = "定时器计数器与比较寄存器匹配时触发。\n";
+        let chunks = chunk_markdown(md);
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            chunks[0].content.contains("定时器"),
+            "got: {:?}",
+            chunks[0].content
+        );
+        assert!(
+            !chunks[0].content.chars().any(|c| (c as u32) > 0x7f && c.is_ascii_control()),
+            "unexpected control chars: {:?}",
+            chunks[0].content
+        );
+        // Mojibake from `bytes[i] as char` often looks like Latin-1 for UTF-8 lead/cont bytes
+        assert!(
+            !chunks[0].content.contains('\u{00e5}'),
+            "looks like byte-as-char mojibake: {:?}",
+            chunks[0].content
+        );
+    }
+
+    #[test]
+    fn chunk_markdown_strips_chinese_inline_markdown() {
+        let md = "见 **输出比较** 与 [PWM 模式](http://example.com/pwm)\n";
+        let chunks = chunk_markdown(md);
+        assert_eq!(chunks.len(), 1);
+        let c = &chunks[0].content;
+        assert!(c.contains("输出比较"), "got: {c:?}");
+        assert!(c.contains("PWM 模式"), "got: {c:?}");
+        assert!(!c.contains("**"));
+        assert!(!c.contains("http://"));
+        assert!(!c.contains('\u{00e8}'), "mojibake: {c:?}");
     }
 
     #[test]
