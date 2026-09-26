@@ -15,6 +15,12 @@ import {
   type KbStatus,
 } from '../api/tauri'
 import { renderMarkdown } from '../utils/markdownHtml'
+import {
+  stripClarification,
+  confusionHint,
+  groupCitationsByNote,
+  linkifyCiteRefs,
+} from '../utils/kbAskDecorate'
 
 const emit = defineEmits<{
   (e: 'open-note', noteId: number): void
@@ -198,6 +204,49 @@ const answerError = ref('')
 const citations = ref<Citation[]>([])
 const noHit = ref(false)
 const askedOnce = ref(false)
+const clarifyBanner = ref<string | null>(null)
+const expandedSnips = ref<Set<number>>(new Set())
+const flashCite = ref<number | null>(null)
+let flashTimer: ReturnType<typeof setTimeout> | null = null
+
+const citeGroups = computed(() => groupCitationsByNote(citations.value))
+
+function toggleSnip(index: number) {
+  const next = new Set(expandedSnips.value)
+  if (next.has(index)) next.delete(index)
+  else next.add(index)
+  expandedSnips.value = next
+}
+
+function onAnswerClick(e: MouseEvent) {
+  const t = e.target as HTMLElement | null
+  const btn = t?.closest?.('button.kb-ref') as HTMLElement | null
+  if (!btn) return
+  const n = Number(btn.getAttribute('data-ref'))
+  if (!Number.isFinite(n)) return
+  const el = document.querySelector(`[data-cite-index="${n}"]`) as HTMLElement | null
+  el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  flashCite.value = n
+  if (flashTimer) clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => {
+    flashCite.value = null
+  }, 1200)
+}
+
+function decorateAnswer(raw: string) {
+  const { banner, body } = stripClarification(raw)
+  let msg = banner
+  if (!msg) {
+    msg = confusionHint(
+      question.value,
+      citations.value.map((c) => ({ note_title: c.note_title, heading: c.heading })),
+    )
+  }
+  clarifyBanner.value = msg
+  const html = renderMarkdown(body)
+  const idxs = citations.value.map((c) => c.index)
+  streamHtml.value = linkifyCiteRefs(html, idxs)
+}
 
 const platformEnabled = computed(() => models.value.some((m) => isPlatformModel(m)))
 
@@ -292,6 +341,9 @@ async function submitAsk() {
   answerError.value = ''
   citations.value = []
   noHit.value = false
+  clarifyBanner.value = null
+  expandedSnips.value = new Set()
+  flashCite.value = null
 
   try {
     await tauriApi.kbAsk(q, selectedModel.value, askTopK.value, (e: KbAskEvent) => {
@@ -300,15 +352,15 @@ async function submitAsk() {
         streamHtml.value = renderMarkdown(streamText.value)
       } else if (e.type === 'done') {
         streamText.value = e.answer
-        streamHtml.value = renderMarkdown(e.answer)
         citations.value = e.citations
         noHit.value = e.citations.length === 0
+        decorateAnswer(e.answer)
         if (e.kbStatus) status.value = e.kbStatus
       } else if (e.type === 'error') {
         answerError.value = e.message
         if (e.partial) {
           streamText.value = e.partial
-          streamHtml.value = renderMarkdown(e.partial)
+          decorateAnswer(e.partial)
         }
       }
     })
@@ -334,6 +386,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (pollTimer) clearTimeout(pollTimer)
+  if (flashTimer) clearTimeout(flashTimer)
 })
 
 watch(embedOpen, (open) => {
@@ -430,8 +483,16 @@ watch(embedOpen, (open) => {
 
         <div v-if="askedOnce" class="kb-answer card">
           <div v-if="asking && !streamText" class="kb-answer-pending">正在检索并生成…</div>
-          <div v-else-if="streamHtml" class="kb-md" v-html="streamHtml" />
-          <div v-else-if="!answerError" class="kb-answer-pending">暂无内容</div>
+          <template v-else>
+            <p v-if="clarifyBanner" class="kb-clarify" role="status">{{ clarifyBanner }}</p>
+            <div
+              v-if="streamHtml"
+              class="kb-md md-body"
+              @click="onAnswerClick"
+              v-html="streamHtml"
+            />
+            <div v-else-if="!answerError" class="kb-answer-pending">暂无内容</div>
+          </template>
 
           <p v-if="answerError" class="kb-answer-err">
             {{ answerError }}
@@ -444,24 +505,34 @@ watch(embedOpen, (open) => {
 
           <div v-if="citations.length" class="kb-citations">
             <h3 class="kb-cite-heading">来源</h3>
-            <button
-              v-for="c in citations"
-              :key="`${c.index}-${c.note_id}`"
-              type="button"
-              class="kb-cite"
-              @click="emit('open-note', c.note_id)"
-            >
-              <span class="kb-cite-idx">[{{ c.index }}]</span>
-              <span class="kb-cite-body">
-                <span class="kb-cite-title">{{ c.note_title || '无标题笔记' }}</span>
+            <div v-for="g in citeGroups" :key="g.note_id" class="kb-cite-group">
+              <button
+                type="button"
+                class="kb-cite-group-head"
+                @click="emit('open-note', g.note_id)"
+              >
+                <span class="kb-cite-title">{{ g.note_title || '无标题笔记' }}</span>
                 <span class="kb-cite-path">
-                  <template v-if="c.folder_path">{{ c.folder_path }}</template>
-                  <template v-if="c.folder_path && c.heading"> · </template>
-                  <template v-if="c.heading">{{ c.heading }}</template>
+                  <template v-if="g.folder_path">{{ g.folder_path }}</template>
+                  <template v-if="g.folder_path"> · </template>
+                  {{ g.items.length }} 个片段
                 </span>
-                <span v-if="c.snippet" class="kb-cite-snip">{{ c.snippet }}</span>
-              </span>
-            </button>
+              </button>
+              <div
+                v-for="c in g.items"
+                :key="c.index"
+                class="kb-cite"
+                :data-cite-index="c.index"
+                :data-flash="flashCite === c.index ? '1' : undefined"
+              >
+                <button type="button" class="kb-cite-row" @click="toggleSnip(c.index)">
+                  <span class="kb-cite-idx">[{{ c.index }}]</span>
+                  <span class="kb-cite-heading-text">{{ c.heading || '片段' }}</span>
+                  <span class="kb-cite-chevron">{{ expandedSnips.has(c.index) ? '▾' : '▸' }}</span>
+                </button>
+                <p v-if="expandedSnips.has(c.index) && c.snippet" class="kb-cite-snip">{{ c.snippet }}</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -792,44 +863,67 @@ watch(embedOpen, (open) => {
   border: 1px solid var(--border-soft);
 }
 
+.kb-clarify {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--c-orange) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c-orange) 35%, transparent);
+}
+
 .kb-md {
   font-size: 0.8125rem;
   line-height: 1.65;
   color: var(--text-1);
   word-break: break-word;
 }
-.kb-md :deep(p) {
-  margin: 0 0 0.65em;
+.kb-answer :deep(h1),
+.kb-answer :deep(h2),
+.kb-answer :deep(h3) {
+  font-weight: 650;
+  margin: 0.85em 0 0.35em;
 }
-.kb-md :deep(p:last-child) {
-  margin-bottom: 0;
-}
-.kb-md :deep(ul),
-.kb-md :deep(ol) {
-  margin: 0 0 0.65em;
-  padding-left: 1.4em;
-}
-.kb-md :deep(code) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.92em;
+.kb-answer :deep(h1) { font-size: 16px; }
+.kb-answer :deep(h2) { font-size: 15px; }
+.kb-answer :deep(h3) { font-size: 14px; }
+.kb-answer :deep(p) { margin: 0.4em 0; font-size: 13px; line-height: 1.55; }
+.kb-answer :deep(ul),
+.kb-answer :deep(ol) { margin: 0.4em 0; padding-left: 1.35em; font-size: 13px; }
+.kb-answer :deep(code) {
+  font-size: 12px;
   padding: 0.1em 0.35em;
   border-radius: 4px;
   background: var(--bg-card-soft);
 }
-.kb-md :deep(pre) {
-  margin: 0 0 0.65em;
+.kb-answer :deep(pre) {
+  margin: 0.4em 0;
   padding: 10px 12px;
   overflow: auto;
   border-radius: var(--radius-sm);
   background: var(--bg-card-soft);
   border: 1px solid var(--border-soft);
 }
-.kb-md :deep(pre code) {
+.kb-answer :deep(pre code) {
   padding: 0;
   background: none;
 }
-.kb-md :deep(a) {
+.kb-answer :deep(a) {
   color: var(--brand-500);
+}
+.kb-answer :deep(button.kb-ref) {
+  display: inline;
+  padding: 0 2px;
+  margin: 0;
+  border: none;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--brand-600);
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.92em;
 }
 
 .kb-cite-heading {
@@ -842,30 +936,59 @@ watch(embedOpen, (open) => {
 .kb-citations {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   padding-top: 4px;
   border-top: 1px solid var(--border-soft);
 }
 
-.kb-cite {
+.kb-cite-group {
   display: flex;
-  gap: 10px;
-  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.kb-cite-group-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   text-align: left;
-  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 4px 0;
+  color: inherit;
+  font: inherit;
+}
+.kb-cite-group-head:hover .kb-cite-title {
+  color: var(--brand-600);
+}
+
+.kb-cite {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
   background: var(--bg-card-soft);
+}
+.kb-cite[data-flash='1'] {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 8px;
+}
+
+.kb-cite-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  border: none;
+  background: transparent;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+  text-align: left;
+  padding: 4px 6px;
+  color: inherit;
+  font: inherit;
 }
-.kb-cite:hover {
-  border-color: color-mix(in srgb, var(--brand-500) 40%, transparent);
-  background: color-mix(in srgb, var(--brand-50) 55%, var(--bg-card-soft));
-  transform: translateY(-1px);
-}
-.kb-cite:active {
-  transform: scale(0.99);
+.kb-cite-row:hover {
+  background: color-mix(in srgb, var(--brand-50) 40%, transparent);
 }
 
 .kb-cite-idx {
@@ -876,11 +999,20 @@ watch(embedOpen, (open) => {
   font-variant-numeric: tabular-nums;
 }
 
-.kb-cite-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.kb-cite-heading-text {
+  font-size: 0.8125rem;
+  color: var(--text-1);
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kb-cite-chevron {
+  color: var(--text-3);
+  font-size: 11px;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .kb-cite-title {
@@ -898,13 +1030,11 @@ watch(embedOpen, (open) => {
 }
 
 .kb-cite-snip {
+  margin: 0;
+  padding: 0 6px 8px 28px;
   font-size: 0.75rem;
   color: var(--text-2);
   line-height: 1.45;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
 }
 
 /* 嵌入设置：清零 .modal-card 默认 24px，与扩展弹窗口径一致 */
