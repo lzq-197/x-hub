@@ -94,10 +94,9 @@ function checkoutRef(ref) {
 function ensureUpstream() {
   const remotes = gitOk(['remote'])
   if (!remotes.split(/\r?\n/).includes('upstream')) {
-    console.error(
+    throw new Error(
       'Missing remote "upstream". Add it first, e.g.\n  git remote add upstream https://github.com/dckxx/x-hub.git',
     )
-    process.exit(1)
   }
 }
 
@@ -110,8 +109,7 @@ function switchForChannel() {
   runOrDie('git', ['fetch', 'upstream'], 'git fetch upstream')
   const probe = run('git', ['rev-parse', '--verify', 'upstream/master'])
   if (probe.status !== 0) {
-    console.error('upstream/master not found after fetch.')
-    process.exit(1)
+    throw new Error('upstream/master not found after fetch.')
   }
   runOrDie(
     'git',
@@ -148,6 +146,7 @@ const startRef = currentRef()
 let preStampConfText = null
 let stampedVersion = null
 let buildFailed = null
+let restoreFailed = false
 
 try {
   switchForChannel()
@@ -166,13 +165,15 @@ try {
       writeFileSync(confPath, preStampConfText, 'utf8')
     }
   } catch (e) {
+    restoreFailed = true
     console.error(`[desktop-build] failed to restore tauri.conf.json: ${e.message || e}`)
   }
   try {
     checkoutRef(startRef)
   } catch (e) {
+    restoreFailed = true
     console.error(`[desktop-build] failed to restore branch: ${e.message || e}`)
   }
 }
 
-if (buildFailed) process.exit(1)
+if (buildFailed || restoreFailed) process.exit(1)
