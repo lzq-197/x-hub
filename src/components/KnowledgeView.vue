@@ -527,7 +527,7 @@ watch(embedOpen, (open) => {
               >
                 <button type="button" class="kb-cite-row" @click="toggleSnip(c.index)">
                   <span class="kb-cite-idx">[{{ c.index }}]</span>
-                  <span class="kb-cite-heading-text">{{ c.heading || '片段' }}</span>
+                  <span v-if="c.heading" class="kb-cite-heading-text">{{ c.heading }}</span>
                   <span class="kb-cite-chevron">{{ expandedSnips.has(c.index) ? '▾' : '▸' }}</span>
                 </button>
                 <p v-if="expandedSnips.has(c.index) && c.snippet" class="kb-cite-snip">{{ c.snippet }}</p>
@@ -880,25 +880,25 @@ watch(embedOpen, (open) => {
   color: var(--text-1);
   word-break: break-word;
 }
-.kb-answer :deep(h1),
-.kb-answer :deep(h2),
-.kb-answer :deep(h3) {
+.kb-md :deep(h1),
+.kb-md :deep(h2),
+.kb-md :deep(h3) {
   font-weight: 650;
   margin: 0.85em 0 0.35em;
 }
-.kb-answer :deep(h1) { font-size: 16px; }
-.kb-answer :deep(h2) { font-size: 15px; }
-.kb-answer :deep(h3) { font-size: 14px; }
-.kb-answer :deep(p) { margin: 0.4em 0; font-size: 13px; line-height: 1.55; }
-.kb-answer :deep(ul),
-.kb-answer :deep(ol) { margin: 0.4em 0; padding-left: 1.35em; font-size: 13px; }
-.kb-answer :deep(code) {
+.kb-md :deep(h1) { font-size: 16px; }
+.kb-md :deep(h2) { font-size: 15px; }
+.kb-md :deep(h3) { font-size: 14px; }
+.kb-md :deep(p) { margin: 0.4em 0; font-size: 13px; line-height: 1.55; }
+.kb-md :deep(ul),
+.kb-md :deep(ol) { margin: 0.4em 0; padding-left: 1.35em; font-size: 13px; }
+.kb-md :deep(code) {
   font-size: 12px;
   padding: 0.1em 0.35em;
   border-radius: 4px;
   background: var(--bg-card-soft);
 }
-.kb-answer :deep(pre) {
+.kb-md :deep(pre) {
   margin: 0.4em 0;
   padding: 10px 12px;
   overflow: auto;
@@ -906,14 +906,14 @@ watch(embedOpen, (open) => {
   background: var(--bg-card-soft);
   border: 1px solid var(--border-soft);
 }
-.kb-answer :deep(pre code) {
+.kb-md :deep(pre code) {
   padding: 0;
   background: none;
 }
-.kb-answer :deep(a) {
+.kb-md :deep(a) {
   color: var(--brand-500);
 }
-.kb-answer :deep(button.kb-ref) {
+.kb-md :deep(button.kb-ref) {
   display: inline;
   padding: 0 2px;
   margin: 0;
