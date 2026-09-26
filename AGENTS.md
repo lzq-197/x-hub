@@ -252,11 +252,13 @@ x-hub/
 ## 命令速查
 
 ```bash
-npm run dev           # Vite 开发服务器（浏览器预览 http://localhost:1420）
-npm run tauri:dev     # Tauri 开发窗口（需 Rust 工具链）
-npm run build         # vue-tsc 类型检查 + vite build
-npm run tauri:build   # 构建桌面应用（产物在 src-tauri/target/release/bundle/）
-npm run tauri:test    # Rust 单元测试（Windows 必须走此包装脚本，见注意事项「cargo test」）
+npm run dev            # Vite 开发服务器（浏览器预览 http://localhost:1420）
+npm run tauri:dev      # Tauri 开发窗口（需 Rust 工具链）
+npm run build          # vue-tsc 类型检查 + vite build（仅前端）
+npm run tauri:build    # 构建桌面应用（当前分支；产物 target/release）
+pnpm run build:prod    # 切 master → 版本 X.Y.Z+MMDDHHmm → tauri build → dist-desktop/prod/
+pnpm run build:release # fetch upstream/master → 官方三位数 → tauri build → dist-desktop/release/
+npm run tauri:test     # Rust 单元测试（Windows 必须走此包装脚本，见注意事项「cargo test」）
 ```
 
 ## 发版清单（版本号单一来源 = README）
