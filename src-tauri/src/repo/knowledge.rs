@@ -290,7 +290,9 @@ fn strip_inline_links(s: &str) -> String {
                 continue;
             }
         }
-        let ch = rest.chars().next().expect("i on char boundary");
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
         out.push(ch);
         i += ch.len_utf8();
     }
@@ -306,9 +308,9 @@ fn parse_link_text(s: &str) -> Option<(String, usize)> {
                 let label = s[..idx].to_string();
                 let rest = &s[idx + 1..];
                 if rest.starts_with('(') {
-                    if let Some(close) = rest.find(')') {
-                        return Some((label, idx + 1 + close + 1));
-                    }
+                    // `[text](url` 未闭合：不当成链接，留给逐字输出，避免留下残段 `(…`
+                    let close = rest.find(')')?;
+                    return Some((label, idx + 1 + close + 1));
                 }
                 return Some((label, idx + 1));
             }
@@ -338,7 +340,9 @@ fn strip_emphasis(s: &str) -> String {
                 continue;
             }
         }
-        let ch = rest.chars().next().expect("i on char boundary");
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
         if ch == '*' || ch == '_' {
             let mark_len = ch.len_utf8();
             if let Some(end) = s[i + mark_len..].find(ch) {
@@ -967,21 +971,9 @@ mod tests {
         let md = "定时器计数器与比较寄存器匹配时触发。\n";
         let chunks = chunk_markdown(md);
         assert_eq!(chunks.len(), 1);
-        assert!(
-            chunks[0].content.contains("定时器"),
-            "got: {:?}",
-            chunks[0].content
-        );
-        assert!(
-            !chunks[0].content.chars().any(|c| (c as u32) > 0x7f && c.is_ascii_control()),
-            "unexpected control chars: {:?}",
-            chunks[0].content
-        );
-        // Mojibake from `bytes[i] as char` often looks like Latin-1 for UTF-8 lead/cont bytes
-        assert!(
-            !chunks[0].content.contains('\u{00e5}'),
-            "looks like byte-as-char mojibake: {:?}",
-            chunks[0].content
+        assert_eq!(
+            chunks[0].content.trim(),
+            "定时器计数器与比较寄存器匹配时触发。"
         );
     }
 
@@ -990,12 +982,24 @@ mod tests {
         let md = "见 **输出比较** 与 [PWM 模式](http://example.com/pwm)\n";
         let chunks = chunk_markdown(md);
         assert_eq!(chunks.len(), 1);
-        let c = &chunks[0].content;
-        assert!(c.contains("输出比较"), "got: {c:?}");
-        assert!(c.contains("PWM 模式"), "got: {c:?}");
-        assert!(!c.contains("**"));
-        assert!(!c.contains("http://"));
-        assert!(!c.contains('\u{00e8}'), "mojibake: {c:?}");
+        assert_eq!(chunks[0].content.trim(), "见 输出比较 与 PWM 模式");
+    }
+
+    #[test]
+    fn chunk_markdown_strips_chinese_image_alt() {
+        let md = "见图 ![电路图](http://example.com/a.png) 说明\n";
+        let chunks = chunk_markdown(md);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content.trim(), "见图 电路图 说明");
+        assert!(!chunks[0].content.contains("http://"));
+    }
+
+    #[test]
+    fn chunk_markdown_leaves_incomplete_link_intact() {
+        let md = "见 [未闭合](http://example.com 说明\n";
+        let chunks = chunk_markdown(md);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content.trim(), "见 [未闭合](http://example.com 说明");
     }
 
     #[test]

@@ -365,16 +365,10 @@ watch(embedOpen, (open) => {
           <span class="kb-meta-item">{{ lastIndexedLabel }}</span>
         </div>
         <div class="kb-bar-actions">
-          <span
-            class="kb-rebuild-hint"
-            title="修复后需重建一次，旧片段才会按正确中文重切并重新嵌入"
-          >
-            来源乱码时请重建索引
-          </span>
           <button
             class="ghost-btn"
             type="button"
-            title="清空并重切全部笔记片段；来源曾乱码时点一次即可修复"
+            title="清空并重切全部笔记片段。若「来源」曾乱码：升级本修复后请点一次重建，旧片段才会按正确中文重切"
             :disabled="rebuilding || statusKind === 'indexing'"
             @click="onRebuild"
           >
@@ -664,14 +658,6 @@ watch(embedOpen, (open) => {
   flex-wrap: wrap;
   gap: 8px;
   margin-left: auto;
-}
-
-.kb-rebuild-hint {
-  font-size: 11px;
-  color: var(--text-3);
-  max-width: 11em;
-  line-height: 1.3;
-  margin-right: 4px;
 }
 
 .spin {
