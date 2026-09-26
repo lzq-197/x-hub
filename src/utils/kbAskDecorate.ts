@@ -74,7 +74,8 @@ export function linkifyCiteRefs(html: string, validIndexes: Set<number> | number
   const doc = new DOMParser().parseFromString(`<div class="kb-linkify-root">${html}</div>`, 'text/html')
   const root = doc.body.firstElementChild
   if (!root) return html
-  const skip = new Set(['PRE', 'CODE'])
+  // Skip pre/code (fences) and a (avoid button-inside-link)
+  const skip = new Set(['PRE', 'CODE', 'A'])
   const walk = (node: Node) => {
     if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as Element

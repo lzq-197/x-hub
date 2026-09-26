@@ -207,6 +207,7 @@ const askedOnce = ref(false)
 const clarifyBanner = ref<string | null>(null)
 const expandedSnips = ref<Set<number>>(new Set())
 const flashCite = ref<number | null>(null)
+const citationsRootRef = ref<HTMLElement | null>(null)
 let flashTimer: ReturnType<typeof setTimeout> | null = null
 
 const citeGroups = computed(() => groupCitationsByNote(citations.value))
@@ -224,7 +225,8 @@ function onAnswerClick(e: MouseEvent) {
   if (!btn) return
   const n = Number(btn.getAttribute('data-ref'))
   if (!Number.isFinite(n)) return
-  const el = document.querySelector(`[data-cite-index="${n}"]`) as HTMLElement | null
+  const root = citationsRootRef.value
+  const el = (root ?? document).querySelector(`[data-cite-index="${n}"]`) as HTMLElement | null
   el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   flashCite.value = n
   if (flashTimer) clearTimeout(flashTimer)
@@ -233,10 +235,11 @@ function onAnswerClick(e: MouseEvent) {
   }, 1200)
 }
 
-function decorateAnswer(raw: string) {
+/** Stream: strip clarify into banner (no linkify). Done: + heuristic + linkify. */
+function paintAnswer(raw: string, opts: { linkify: boolean; heuristic: boolean }) {
   const { banner, body } = stripClarification(raw)
   let msg = banner
-  if (!msg) {
+  if (!msg && opts.heuristic) {
     msg = confusionHint(
       question.value,
       citations.value.map((c) => ({ note_title: c.note_title, heading: c.heading })),
@@ -244,8 +247,16 @@ function decorateAnswer(raw: string) {
   }
   clarifyBanner.value = msg
   const html = renderMarkdown(body)
-  const idxs = citations.value.map((c) => c.index)
-  streamHtml.value = linkifyCiteRefs(html, idxs)
+  if (opts.linkify) {
+    const idxs = citations.value.map((c) => c.index)
+    streamHtml.value = linkifyCiteRefs(html, idxs)
+  } else {
+    streamHtml.value = html
+  }
+}
+
+function decorateAnswer(raw: string) {
+  paintAnswer(raw, { linkify: true, heuristic: true })
 }
 
 const platformEnabled = computed(() => models.value.some((m) => isPlatformModel(m)))
@@ -349,7 +360,7 @@ async function submitAsk() {
     await tauriApi.kbAsk(q, selectedModel.value, askTopK.value, (e: KbAskEvent) => {
       if (e.type === 'chunk') {
         streamText.value += e.content
-        streamHtml.value = renderMarkdown(streamText.value)
+        paintAnswer(streamText.value, { linkify: false, heuristic: false })
       } else if (e.type === 'done') {
         streamText.value = e.answer
         citations.value = e.citations
@@ -503,7 +514,7 @@ watch(embedOpen, (open) => {
             知识库中未找到直接相关内容，以下为模型通用回答。
           </p>
 
-          <div v-if="citations.length" class="kb-citations">
+          <div v-if="citations.length" ref="citationsRootRef" class="kb-citations">
             <h3 class="kb-cite-heading">来源</h3>
             <div v-for="g in citeGroups" :key="g.note_id" class="kb-cite-group">
               <button
@@ -525,11 +536,27 @@ watch(embedOpen, (open) => {
                 :data-cite-index="c.index"
                 :data-flash="flashCite === c.index ? '1' : undefined"
               >
-                <button type="button" class="kb-cite-row" @click="toggleSnip(c.index)">
-                  <span class="kb-cite-idx">[{{ c.index }}]</span>
-                  <span v-if="c.heading" class="kb-cite-heading-text">{{ c.heading }}</span>
-                  <span class="kb-cite-chevron">{{ expandedSnips.has(c.index) ? '▾' : '▸' }}</span>
-                </button>
+                <div class="kb-cite-row">
+                  <button
+                    type="button"
+                    class="kb-cite-open"
+                    :title="'打开笔记'"
+                    @click="emit('open-note', c.note_id)"
+                  >
+                    <span class="kb-cite-idx">[{{ c.index }}]</span>
+                    <span v-if="c.heading" class="kb-cite-heading-text">{{ c.heading }}</span>
+                  </button>
+                  <button
+                    v-if="c.snippet"
+                    type="button"
+                    class="kb-cite-chevron"
+                    :title="expandedSnips.has(c.index) ? '收起摘要' : '展开摘要'"
+                    :aria-expanded="expandedSnips.has(c.index)"
+                    @click="toggleSnip(c.index)"
+                  >
+                    {{ expandedSnips.has(c.index) ? '▾' : '▸' }}
+                  </button>
+                </div>
                 <p v-if="expandedSnips.has(c.index) && c.snippet" class="kb-cite-snip">{{ c.snippet }}</p>
               </div>
             </div>
@@ -976,9 +1003,17 @@ watch(embedOpen, (open) => {
 
 .kb-cite-row {
   display: flex;
-  gap: 8px;
+  gap: 4px;
   align-items: baseline;
   width: 100%;
+  padding: 2px 4px;
+}
+.kb-cite-open {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
   cursor: pointer;
@@ -986,8 +1021,9 @@ watch(embedOpen, (open) => {
   padding: 4px 6px;
   color: inherit;
   font: inherit;
+  border-radius: 6px;
 }
-.kb-cite-row:hover {
+.kb-cite-open:hover {
   background: color-mix(in srgb, var(--brand-50) 40%, transparent);
 }
 
@@ -1009,10 +1045,19 @@ watch(embedOpen, (open) => {
 }
 
 .kb-cite-chevron {
+  border: none;
+  background: transparent;
   color: var(--text-3);
   font-size: 11px;
-  margin-left: auto;
   flex-shrink: 0;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+  line-height: 1;
+}
+.kb-cite-chevron:hover {
+  background: color-mix(in srgb, var(--brand-50) 40%, transparent);
+  color: var(--text-2);
 }
 
 .kb-cite-title {
