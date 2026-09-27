@@ -3,9 +3,9 @@
 use crate::commands::DbState;
 use crate::models::{
     ChatMessage, Citation, EmbedTestResult, ImportResult, IndexProgressEvent, KbAskEvent,
-    KbChunkHit, KbEmbedConfigView, KbStatus,
+    KbChunkHit, KbEmbedConfigView, KbMessage, KbProject, KbSession, KbStatus,
 };
-use crate::repo::{folder, knowledge as kb_repo, note};
+use crate::repo::{folder, kb_chat, knowledge as kb_repo, note};
 use rusqlite::Connection;
 use std::cell::Cell;
 use std::fs;
@@ -976,6 +976,137 @@ pub async fn kb_test_embed(
             dim: None,
         }),
     }
+}
+
+// ---------- 知识库会话 CRUD ----------
+
+fn write_kb_active_session(id: Option<i64>) -> Result<(), String> {
+    let mut cfg = crate::config::load();
+    cfg.kb_active_session_id = id;
+    crate::config::save(&cfg)
+}
+
+#[tauri::command]
+pub fn list_kb_projects(state: State<'_, DbState>) -> Result<Vec<KbProject>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::list_projects(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_kb_project(state: State<'_, DbState>, name: String) -> Result<KbProject, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let p = kb_chat::create_project(&conn, &name).map_err(|e| e.to_string())?;
+    log::info!("新建知识库项目: id={} name={}", p.id, p.name);
+    Ok(p)
+}
+
+#[tauri::command]
+pub fn rename_kb_project(
+    state: State<'_, DbState>,
+    id: i64,
+    name: String,
+) -> Result<KbProject, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::rename_project(&conn, id, &name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_kb_project(state: State<'_, DbState>, id: i64) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::delete_project(&conn, id).map_err(|e| e.to_string())?;
+    log::info!("删除知识库项目: id={}", id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_kb_sessions(state: State<'_, DbState>) -> Result<Vec<KbSession>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::list_sessions(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_kb_session(
+    state: State<'_, DbState>,
+    model_name: Option<String>,
+    project_id: Option<i64>,
+) -> Result<KbSession, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let model = model_name.unwrap_or_else(|| {
+        crate::commands::default_session_model_name(&crate::config::load().chat_models)
+    });
+    let s = kb_chat::create_session(&conn, "新对话", &model, project_id)
+        .map_err(|e| e.to_string())?;
+    drop(conn);
+    write_kb_active_session(Some(s.id))?;
+    log::info!("新建知识库会话: id={} title={}", s.id, s.title);
+    Ok(s)
+}
+
+#[tauri::command]
+pub fn rename_kb_session(
+    state: State<'_, DbState>,
+    id: i64,
+    title: String,
+) -> Result<KbSession, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::rename_session(&conn, id, &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_kb_session(state: State<'_, DbState>, id: i64) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::delete_session(&conn, id).map_err(|e| e.to_string())?;
+    drop(conn);
+    let cfg = crate::config::load();
+    if cfg.kb_active_session_id == Some(id) {
+        write_kb_active_session(None)?;
+    }
+    log::info!("删除知识库会话: id={}", id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn pin_kb_session(
+    state: State<'_, DbState>,
+    id: i64,
+    pinned: bool,
+) -> Result<KbSession, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::set_pinned(&conn, id, pinned).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn move_kb_session_to_project(
+    state: State<'_, DbState>,
+    id: i64,
+    project_id: Option<i64>,
+) -> Result<KbSession, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::move_to_project(&conn, id, project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn clear_kb_sessions(state: State<'_, DbState>) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::clear_sessions(&conn).map_err(|e| e.to_string())?;
+    drop(conn);
+    write_kb_active_session(None)?;
+    log::info!("清空知识库会话");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_kb_messages(
+    state: State<'_, DbState>,
+    session_id: i64,
+) -> Result<Vec<KbMessage>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::list_messages(&conn, session_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_kb_active_session(id: Option<i64>) -> Result<(), String> {
+    write_kb_active_session(id)
 }
 
 #[cfg(test)]

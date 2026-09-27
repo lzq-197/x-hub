@@ -2615,7 +2615,7 @@ pub(crate) fn pick_chat_model(
 
 /// 新会话默认用的模型名：默认模型是平台条目（或只有平台条目）时统一存**入口名**，
 /// 而不是某一个具体的平台模型——这样会话不会把「当时那一个模型」固化下来。
-fn default_session_model_name(models: &[ChatModelConfig]) -> String {
+pub(crate) fn default_session_model_name(models: &[ChatModelConfig]) -> String {
     if let Some(d) = models.iter().find(|m| m.is_default) {
         if crate::chat::is_platform_model(d) {
             return crate::chat::PLATFORM_ENTRY_NAME.to_string();

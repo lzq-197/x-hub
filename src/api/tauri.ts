@@ -918,6 +918,33 @@ export interface EmbedTestResult {
   dim: number | null
 }
 
+export interface KbProject {
+  id: number
+  name: string
+  sort_order: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface KbSession {
+  id: number
+  title: string
+  model_name: string
+  project_id: number | null
+  pinned: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface KbMessage {
+  id: number
+  session_id: number
+  role: string
+  content: string
+  citations_json: string | null
+  created_at: string
+}
+
 export const isTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 export const tauriApi = {
@@ -1021,6 +1048,30 @@ export const tauriApi = {
     }),
   kbTestEmbed: (baseUrl: string, model: string, apiKey: string) =>
     invoke<EmbedTestResult>('kb_test_embed', { baseUrl, model, apiKey }),
+  // ---- 知识库会话 ----
+  listKbProjects: () => invoke<KbProject[]>('list_kb_projects'),
+  createKbProject: (name: string) => invoke<KbProject>('create_kb_project', { name }),
+  renameKbProject: (id: number, name: string) =>
+    invoke<KbProject>('rename_kb_project', { id, name }),
+  deleteKbProject: (id: number) => invoke<void>('delete_kb_project', { id }),
+  listKbSessions: () => invoke<KbSession[]>('list_kb_sessions'),
+  createKbSession: (payload?: { modelName?: string | null; projectId?: number | null }) =>
+    invoke<KbSession>('create_kb_session', {
+      modelName: payload?.modelName ?? null,
+      projectId: payload?.projectId ?? null,
+    }),
+  renameKbSession: (id: number, title: string) =>
+    invoke<KbSession>('rename_kb_session', { id, title }),
+  deleteKbSession: (id: number) => invoke<void>('delete_kb_session', { id }),
+  pinKbSession: (id: number, pinned: boolean) =>
+    invoke<KbSession>('pin_kb_session', { id, pinned }),
+  moveKbSessionToProject: (id: number, projectId: number | null) =>
+    invoke<KbSession>('move_kb_session_to_project', { id, projectId }),
+  clearKbSessions: () => invoke<void>('clear_kb_sessions'),
+  listKbMessages: (sessionId: number) =>
+    invoke<KbMessage[]>('list_kb_messages', { sessionId }),
+  setKbActiveSession: (id: number | null) =>
+    invoke<void>('set_kb_active_session', { id }),
   searchAll: (keyword: string) => invoke<SearchResult>('search_all', { keyword }),
   listTodos: () => invoke<Todo[]>('list_todos'),
   createTodo: (title: string, parentId?: number | null, createdAt?: string) =>
