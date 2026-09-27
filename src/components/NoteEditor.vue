@@ -334,7 +334,7 @@ watch(
   },
 )
 
-/** 知识库引用：Crepe 就绪后按 UTF-8 字节偏移定位选区；失败静默回退标题，再失败只打开笔记 */
+/** 知识库引用：Crepe 就绪后按 UTF-8 字节偏移定位选区；偏移无效只打开；偏移有效但搜不到才回退标题 */
 async function applyReveal() {
   const r = props.reveal
   const note = props.note
@@ -363,6 +363,13 @@ async function applyReveal() {
         const raw = utf8ByteSlice(md, r.mdStart, r.mdEnd)
         const needle = plainForMatch(raw)
         range = needle ? findTextRangeInDoc(view.state.doc, needle) : null
+        if (!range) {
+          const hPos = r.heading ? findHeadingPosInDoc(view.state.doc, r.heading) : null
+          if (hPos != null) {
+            const sel = TextSelection.findFrom(view.state.doc.resolve(hPos), 1, true)
+            if (sel) view.dispatch(view.state.tr.setSelection(sel).scrollIntoView())
+          }
+        }
       }
       if (range) {
         const tr = view.state.tr
@@ -383,11 +390,6 @@ async function applyReveal() {
           })
         }, 2000)
         return
-      }
-      const hPos = r.heading ? findHeadingPosInDoc(view.state.doc, r.heading) : null
-      if (hPos != null) {
-        const sel = TextSelection.findFrom(view.state.doc.resolve(hPos), 1, true)
-        if (sel) view.dispatch(view.state.tr.setSelection(sel).scrollIntoView())
       }
     })
   } catch (e) {
