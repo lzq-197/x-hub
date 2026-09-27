@@ -357,7 +357,9 @@ async function submitAsk() {
   flashCite.value = null
 
   try {
-    await tauriApi.kbAsk(q, selectedModel.value, askTopK.value, (e: KbAskEvent) => {
+    // Task 5 临时：无会话 UI 时先建会话再问；Task 7 接侧栏后改为复用 activeSession
+    const session = await tauriApi.createKbSession({ modelName: selectedModel.value })
+    await tauriApi.kbAsk(session.id, q, selectedModel.value, askTopK.value, (e: KbAskEvent) => {
       if (e.type === 'chunk') {
         streamText.value += e.content
         paintAnswer(streamText.value, { linkify: false, heuristic: false })

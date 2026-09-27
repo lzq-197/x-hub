@@ -745,6 +745,38 @@ fn chat_msg(role: &str, content: String) -> ChatMessage {
     }
 }
 
+/// 截断会话历史供 LLM：保留后缀，受消息条数与字符预算约束（不含 system）。
+/// `msgs` 已含本轮刚写入的 user；从队头整条丢弃，避免半截。
+pub(crate) fn truncate_kb_history(
+    msgs: &[(String, String)],
+    max_messages: usize,
+    max_chars: usize,
+) -> Vec<(String, String)> {
+    if msgs.is_empty() || max_messages == 0 {
+        return Vec::new();
+    }
+    let mut start = msgs.len();
+    let mut chars = 0usize;
+    let mut count = 0usize;
+    while start > 0 && count < max_messages {
+        let i = start - 1;
+        let c = msgs[i].1.chars().count();
+        // 已有内容时不许再超预算；单条超预算仍保留最新一条
+        if count > 0 && chars.saturating_add(c) > max_chars {
+            break;
+        }
+        chars = chars.saturating_add(c);
+        count += 1;
+        start = i;
+    }
+    let mut out: Vec<(String, String)> = msgs[start..].to_vec();
+    // 避免以孤儿 assistant 开头（半截 user/assistant 对）
+    while out.first().is_some_and(|(r, _)| r == "assistant") {
+        out.remove(0);
+    }
+    out
+}
+
 /// 嵌入 query → hybrid_search（锁外嵌入，锁内检索）。
 #[tauri::command]
 pub async fn kb_search(
@@ -772,10 +804,11 @@ pub async fn kb_search(
     kb_repo::hybrid_search(&conn, &query_vec, &query, top_k)
 }
 
-/// RAG 流式问答：检索 → 注入 system prompt → stream_chat → Channel 事件。
+/// RAG 流式问答：持久化 user → 每轮新鲜检索 → 截断历史 → stream → 持久化 assistant。
 #[tauri::command]
 pub async fn kb_ask(
     app: AppHandle,
+    session_id: i64,
     question: String,
     model_id: String,
     top_k: Option<i64>,
@@ -806,7 +839,30 @@ pub async fn kb_ask(
             })?
     };
 
-    // 检索（复用 kb_search 逻辑：锁外嵌入）
+    // 1–3: 校验会话、可选更新模型、写入 user、默认标题自动命名
+    {
+        let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let session = kb_chat::get_session(&conn, session_id).map_err(|e| {
+            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                format!("会话不存在: {session_id}")
+            } else {
+                e.to_string()
+            }
+        })?;
+        if !model_id.trim().is_empty() {
+            kb_chat::set_session_model(&conn, session_id, &model.name)
+                .map_err(|e| e.to_string())?;
+        }
+        kb_chat::add_message(&conn, session_id, "user", &question, None)
+            .map_err(|e| e.to_string())?;
+        if session.title == "新对话" {
+            let title = kb_chat::auto_title_from_question(&question);
+            kb_chat::rename_session(&conn, session_id, &title).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 4: 锁外嵌入 + 锁内检索（每轮新鲜 RAG）
     let cfg = embed_config_from_disk();
     let query_vec = match crate::embed::embed_batch(&cfg, &[question.clone()]).await {
         Ok(mut vecs) => vecs.pop().unwrap_or_default(),
@@ -821,25 +877,33 @@ pub async fn kb_ask(
         kb_repo::hybrid_search(&conn, &query_vec, &question, top_k)?
     };
 
-    let (messages, citations) = if hits.is_empty() {
-        (
-            vec![
-                chat_msg("system", NO_HIT_SYSTEM.into()),
-                chat_msg("user", question.clone()),
-            ],
-            Vec::new(),
-        )
-    } else {
-        let system = build_rag_system_prompt(&hits);
-        let citations = hits_to_citations(&hits);
-        (
-            vec![
-                chat_msg("system", system),
-                chat_msg("user", question.clone()),
-            ],
-            citations,
-        )
+    // 5–6: 读历史截断 + 拼 system(RAG) + history
+    let history = {
+        let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let msgs = kb_chat::list_messages(&conn, session_id).map_err(|e| e.to_string())?;
+        let pairs: Vec<(String, String)> = msgs
+            .into_iter()
+            .map(|m| (m.role, m.content))
+            .collect();
+        truncate_kb_history(&pairs, 40, 12_000)
     };
+
+    let citations = if hits.is_empty() {
+        Vec::new()
+    } else {
+        hits_to_citations(&hits)
+    };
+    let system = if hits.is_empty() {
+        NO_HIT_SYSTEM.to_string()
+    } else {
+        build_rag_system_prompt(&hits)
+    };
+    let mut messages = Vec::with_capacity(1 + history.len());
+    messages.push(chat_msg("system", system));
+    for (role, content) in history {
+        messages.push(chat_msg(&role, content));
+    }
 
     let mut reply = String::new();
     let chunk_sender = on_event.clone();
@@ -852,9 +916,20 @@ pub async fn kb_ask(
 
     match result {
         Ok(_) if !reply.trim().is_empty() => {
+            let citations_json =
+                serde_json::to_string(&citations).map_err(|e| e.to_string())?;
             let kb_status = {
                 let state = app.try_state::<DbState>().ok_or("数据库未就绪")?;
                 let conn = state.0.lock().map_err(|e| e.to_string())?;
+                kb_chat::add_message(
+                    &conn,
+                    session_id,
+                    "assistant",
+                    &reply,
+                    Some(&citations_json),
+                )
+                .map_err(|e| e.to_string())?;
+                kb_chat::touch_session(&conn, session_id).map_err(|e| e.to_string())?;
                 let (status, progress, model_name, _, _, last_indexed_at, error) =
                     kb_repo::get_meta(&conn).map_err(|e| e.to_string())?;
                 let indexed_notes =
@@ -885,6 +960,7 @@ pub async fn kb_ask(
                 .map_err(|e| e.to_string())?;
         }
         Ok(_) => {
+            // 不落空 assistant（user 已保存）
             on_event
                 .send(KbAskEvent::Error {
                     message: "模型未返回任何内容".into(),
@@ -893,6 +969,7 @@ pub async fn kb_ask(
                 .map_err(|e| e.to_string())?;
         }
         Err(e) => {
+            // 流式失败：不插入空/半截 assistant
             on_event
                 .send(KbAskEvent::Error {
                     message: e,
@@ -1247,6 +1324,37 @@ mod tests {
     fn rag_system_prompt_includes_clarification_rule() {
         let p = super::build_rag_system_prompt(&[]);
         assert!(p.contains("【澄清】"), "prompt missing clarify marker: {p}");
+    }
+
+    #[test]
+    fn truncate_keeps_last_messages_by_count() {
+        let msgs: Vec<(String, String)> = (0..50)
+            .map(|i| {
+                (
+                    if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                    format!("m{i}"),
+                )
+            })
+            .collect();
+        let out = truncate_kb_history(&msgs, 40, 100_000);
+        assert_eq!(out.len(), 40);
+        assert_eq!(out[0].1, "m10");
+        assert_eq!(out.last().unwrap().1, "m49");
+    }
+
+    #[test]
+    fn truncate_binds_on_char_budget() {
+        let msgs = vec![
+            ("user".into(), "a".repeat(5000)),
+            ("assistant".into(), "b".repeat(5000)),
+            ("user".into(), "c".repeat(5000)),
+            ("assistant".into(), "d".repeat(100)),
+        ];
+        let out = truncate_kb_history(&msgs, 40, 12_000);
+        assert!(out.len() < 4);
+        assert_eq!(out.last().unwrap().1, "d".repeat(100));
+        let chars: usize = out.iter().map(|(_, c)| c.chars().count()).sum();
+        assert!(chars <= 12_000);
     }
 
     #[test]

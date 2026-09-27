@@ -1029,6 +1029,7 @@ export const tauriApi = {
   kbSearch: (query: string, topK?: number | null) =>
     invoke<KbChunkHit[]>('kb_search', { query, topK: topK ?? null }),
   kbAsk: (
+    sessionId: number,
     question: string,
     modelId: string,
     topK: number | null,
@@ -1036,7 +1037,7 @@ export const tauriApi = {
   ) => {
     const channel = new Channel<KbAskEvent>()
     channel.onmessage = onEvent
-    return invoke<void>('kb_ask', { question, modelId, topK, onEvent: channel })
+    return invoke<void>('kb_ask', { sessionId, question, modelId, topK, onEvent: channel })
   },
   getKbEmbedConfig: () => invoke<KbEmbedConfigView>('get_kb_embed_config'),
   saveKbEmbedConfig: (baseUrl: string, model: string, apiKey: string, topK?: number | null) =>
