@@ -552,6 +552,15 @@ const accountLoggedIn = ref(false)
 const selectedModel = ref('')
 const askTopK = ref(6)
 const question = ref('')
+const inputEl = ref<HTMLTextAreaElement | null>(null)
+
+/** Autosize like ChatPanel: grow with content, clamp ~6–8 lines. */
+function autosize() {
+  const el = inputEl.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+}
 
 const platformEnabled = computed(() => models.value.some((m) => isPlatformModel(m)))
 
@@ -670,6 +679,7 @@ async function submitAsk() {
 
   asking.value = true
   question.value = ''
+  void nextTick(() => autosize())
   messages.value.push({
     id: `u-${Date.now()}`,
     role: 'user',
@@ -962,24 +972,30 @@ watch(embedOpen, (open) => {
               />
             </div>
 
-            <div class="kb-composer">
+            <div class="kb-composer-box">
               <textarea
+                ref="inputEl"
                 v-model="question"
                 class="kb-input"
-                rows="3"
+                rows="1"
                 placeholder="基于你的笔记提问…（Enter 发送，Shift+Enter 换行）"
                 :disabled="asking"
+                @input="autosize"
                 @keydown="onAskKeydown"
               />
-              <button
-                class="pill-btn kb-send"
-                type="button"
-                :disabled="asking || !question.trim() || modelOptions.length === 0"
-                @click="submitAsk"
-              >
-                <Send :size="14" :stroke-width="2" aria-hidden="true" />
-                {{ asking ? '生成中…' : '提问' }}
-              </button>
+              <div class="kb-composer-foot">
+                <span v-if="asking" class="kb-composer-hint">生成中…</span>
+                <button
+                  class="kb-send"
+                  type="button"
+                  :disabled="asking || !question.trim() || modelOptions.length === 0"
+                  :title="asking ? '生成中…' : '发送'"
+                  :aria-label="asking ? '生成中' : '发送'"
+                  @click="submitAsk"
+                >
+                  <Send :size="16" :stroke-width="2.2" aria-hidden="true" />
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1316,31 +1332,41 @@ watch(embedOpen, (open) => {
   width: 110px;
 }
 
-.kb-composer {
+/* Doubao-style: large frosted box, borderless autosize textarea, brand send pill */
+.kb-composer-box {
   display: flex;
-  gap: 10px;
-  align-items: flex-end;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 10px;
+  border-radius: var(--radius-lg);
+  background: var(--frost-surface);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--frost-edge), var(--shadow-card);
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.kb-composer-box:focus-within {
+  border-color: color-mix(in srgb, var(--brand-500) 45%, transparent);
+  box-shadow: var(--frost-edge), var(--shadow-focus);
 }
 
 .kb-input {
-  flex: 1;
+  width: 100%;
   min-width: 0;
-  resize: vertical;
-  min-height: 72px;
-  max-height: 200px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-soft);
+  min-height: 40px;
+  max-height: 160px;
+  resize: none;
+  padding: 2px 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-1);
   font-size: 0.8125rem;
-  line-height: 1.5;
+  line-height: 1.55;
   font-family: inherit;
 }
 .kb-input:focus {
   outline: none;
-  border-color: color-mix(in srgb, var(--brand-500) 55%, transparent);
-  box-shadow: var(--shadow-focus);
+  box-shadow: none;
 }
 .kb-input:disabled {
   opacity: 0.65;
@@ -1349,9 +1375,47 @@ watch(embedOpen, (open) => {
   color: var(--text-4);
 }
 
+.kb-composer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 36px;
+}
+
+.kb-composer-hint {
+  margin-right: auto;
+  font-size: 0.71875rem;
+  color: var(--text-3);
+}
+
 .kb-send {
   flex-shrink: 0;
-  align-self: flex-end;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--brand-500);
+  color: var(--text-on-accent);
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.15s, filter 0.15s;
+}
+.kb-send:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.kb-send:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.kb-send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.kb-send:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
 }
 
 .kb-answer-pending {
