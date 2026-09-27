@@ -1,7 +1,12 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, ref } from 'vue'
+import { computed, inject, nextTick, onUnmounted, ref } from 'vue'
 import { Folder, FolderPlus, MessageSquarePlus, Pin, Plus } from 'lucide-vue-next'
-import type { KbProject, KbSession } from '../api/tauri'
+import type {
+  KbDragSourceZone,
+  KbPlaceTarget,
+  KbProject,
+  KbSession,
+} from '../api/tauri'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 
 const props = defineProps<{
@@ -17,6 +22,7 @@ const emit = defineEmits<{
   rename: [id: number, title: string]
   pin: [id: number, pinned: boolean]
   move: [id: number, projectId: number | null]
+  place: [id: number, sourceZone: KbDragSourceZone, target: KbPlaceTarget]
   delete: [id: number]
   'clear-all': []
   'create-project': [name: string]
@@ -68,7 +74,11 @@ function toggleProject(id: number) {
   collapsed.value = next
 }
 
+/** 拖完松手后吞掉随后的 click，避免误选会话 */
+let suppressSelect = false
+
 function onSelect(id: number) {
+  if (suppressSelect) return
   if (props.disabled) {
     showToast('生成中，请稍候')
     return
@@ -180,6 +190,294 @@ function showProjectEdit(id: number) {
   return editing.value?.kind === 'project' && editing.value.id === id
 }
 
+// ---- Pointer DnD（禁止 HTML5 DnD；命中见设计 §5）----
+type DragState = {
+  id: number
+  sourceZone: KbDragSourceZone
+  startY: number
+  startX: number
+  active: boolean
+}
+
+type HotState = {
+  kind: 'container' | 'gap'
+  key: string
+  beforeId: number | null
+  place: KbPlaceTarget
+  edgeY: number | null
+}
+
+const sideBodyRef = ref<HTMLElement | null>(null)
+const drag = ref<DragState | null>(null)
+const hot = ref<HotState | null>(null)
+const lineTop = ref<number | null>(null)
+
+let hoverExpandTimer: ReturnType<typeof setTimeout> | null = null
+let hoverExpandTarget: number | null = null
+let dragCancelBound = false
+
+function clearHoverExpand() {
+  if (hoverExpandTimer != null) {
+    clearTimeout(hoverExpandTimer)
+    hoverExpandTimer = null
+  }
+  hoverExpandTarget = null
+}
+
+function scheduleHoverExpand(projectId: number) {
+  if (isExpanded(projectId)) return
+  if (hoverExpandTarget === projectId) return
+  clearHoverExpand()
+  hoverExpandTarget = projectId
+  hoverExpandTimer = setTimeout(() => {
+    hoverExpandTimer = null
+    if (!isExpanded(projectId)) {
+      const next = new Set(collapsed.value)
+      next.delete(projectId)
+      collapsed.value = next
+    }
+  }, 400)
+}
+
+function clearDragChrome() {
+  clearHoverExpand()
+  document.body.classList.remove('kb-session-dragging')
+  drag.value = null
+  hot.value = null
+  lineTop.value = null
+  if (dragCancelBound) {
+    window.removeEventListener('keydown', onDragKeydown)
+    window.removeEventListener('blur', onDragWindowBlur)
+    dragCancelBound = false
+  }
+}
+
+function cancelDrag() {
+  if (!drag.value) return
+  clearDragChrome()
+}
+
+function onDragKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    cancelDrag()
+  }
+}
+
+function onDragWindowBlur() {
+  cancelDrag()
+}
+
+function bindDragCancel() {
+  if (dragCancelBound) return
+  dragCancelBound = true
+  window.addEventListener('keydown', onDragKeydown)
+  window.addEventListener('blur', onDragWindowBlur)
+}
+
+function sessionsInZone(zone: KbDragSourceZone, projectId: number | null): KbSession[] {
+  if (zone === 'pinned') return pinned.value
+  if (zone === 'recent') return recent.value
+  if (projectId == null) return []
+  return props.sessions.filter((s) => s.project_id === projectId).slice().sort(bySortAsc)
+}
+
+function isHotContainer(key: string) {
+  return hot.value?.kind === 'container' && hot.value.key === key
+}
+
+function resolveHit(clientX: number, clientY: number): HotState | null {
+  const body = sideBodyRef.value
+  if (!body) return null
+  const raw = document.elementFromPoint(clientX, clientY)
+  if (!raw || !body.contains(raw)) return null
+  const drop = (raw as HTMLElement).closest?.('[data-kb-drop]') as HTMLElement | null
+  if (!drop || !body.contains(drop)) return null
+
+  const kind = drop.dataset.kbDrop
+  if (kind === 'pinned-head') {
+    return {
+      kind: 'container',
+      key: 'pinned',
+      beforeId: null,
+      place: { zone: 'pinned', beforeId: null },
+      edgeY: null,
+    }
+  }
+  if (kind === 'recent-head') {
+    return {
+      kind: 'container',
+      key: 'recent',
+      beforeId: null,
+      place: { zone: 'recent', beforeId: null },
+      edgeY: null,
+    }
+  }
+  if (kind === 'project-row' || kind === 'project-empty') {
+    const projectId = Number(drop.dataset.projectId)
+    if (!Number.isFinite(projectId)) return null
+    return {
+      kind: 'container',
+      key: `project-${projectId}`,
+      beforeId: null,
+      place: { zone: 'project', projectId, beforeId: null },
+      edgeY: null,
+    }
+  }
+  if (kind === 'session') {
+    const id = Number(drop.dataset.sessionId)
+    const zone = drop.dataset.kbZone as KbDragSourceZone | undefined
+    if (!Number.isFinite(id) || !zone) return null
+    const projectId =
+      zone === 'project' ? Number(drop.dataset.projectId) : null
+    if (zone === 'project' && !Number.isFinite(projectId)) return null
+
+    const rect = drop.getBoundingClientRect()
+    const upper = clientY < rect.top + rect.height / 2
+    const list = sessionsInZone(zone, projectId)
+    const idx = list.findIndex((s) => s.id === id)
+
+    if (upper) {
+      const place: KbPlaceTarget =
+        zone === 'project'
+          ? { zone: 'project', projectId: projectId!, beforeId: id }
+          : { zone, beforeId: id }
+      return {
+        kind: 'gap',
+        key: `${zone}-before-${id}`,
+        beforeId: id,
+        place,
+        edgeY: rect.top,
+      }
+    }
+
+    const nextId = idx >= 0 && idx < list.length - 1 ? list[idx + 1]!.id : null
+    const place: KbPlaceTarget =
+      zone === 'project'
+        ? { zone: 'project', projectId: projectId!, beforeId: nextId }
+        : { zone, beforeId: nextId }
+    return {
+      kind: 'gap',
+      key: `${zone}-after-${id}`,
+      beforeId: nextId,
+      place,
+      edgeY: rect.bottom,
+    }
+  }
+  return null
+}
+
+function updateDragAim(clientX: number, clientY: number) {
+  const live = drag.value
+  const body = sideBodyRef.value
+  if (!live?.active || !body) return
+
+  const hit = resolveHit(clientX, clientY)
+  hot.value = hit
+
+  if (!hit) {
+    lineTop.value = null
+    clearHoverExpand()
+    return
+  }
+
+  if (hit.kind === 'container' && hit.place.zone === 'project' && hit.place.projectId != null) {
+    scheduleHoverExpand(hit.place.projectId)
+  } else {
+    clearHoverExpand()
+  }
+
+  if (hit.kind === 'gap' && hit.edgeY != null) {
+    const bodyRect = body.getBoundingClientRect()
+    lineTop.value = hit.edgeY - bodyRect.top + body.scrollTop
+  } else {
+    lineTop.value = null
+  }
+}
+
+function finishDrag() {
+  const live = drag.value
+  const aim = hot.value
+  suppressSelect = true
+  setTimeout(() => {
+    suppressSelect = false
+  }, 0)
+  clearDragChrome()
+  if (!live || !aim) return
+  emit('place', live.id, live.sourceZone, aim.place)
+}
+
+function onSessionPointerDown(s: KbSession, zone: KbDragSourceZone, e: PointerEvent) {
+  if (e.button !== 0 || props.disabled || editing.value) return
+  const target = e.target as HTMLElement | null
+  if (target?.closest('.kb-more, input, .kb-edit, [data-no-drag]')) return
+
+  const el = e.currentTarget as HTMLElement
+  const startX = e.clientX
+  const startY = e.clientY
+  let active = false
+  let dead = false
+
+  drag.value = {
+    id: s.id,
+    sourceZone: zone,
+    startX,
+    startY,
+    active: false,
+  }
+
+  el.addEventListener('pointermove', onMove)
+  el.addEventListener('pointerup', onUp)
+  el.addEventListener('pointercancel', onUp)
+  window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
+
+  function begin(): boolean {
+    try {
+      el.setPointerCapture(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+    if (!drag.value) return false
+    drag.value.active = true
+    document.body.classList.add('kb-session-dragging')
+    document.getSelection()?.removeAllRanges()
+    bindDragCancel()
+    return true
+  }
+
+  function onMove(ev: PointerEvent) {
+    if (dead) return
+    if (!active) {
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return
+      if (!begin()) {
+        dead = true
+        return
+      }
+      active = true
+    }
+    updateDragAim(ev.clientX, ev.clientY)
+  }
+
+  function onUp() {
+    el.removeEventListener('pointermove', onMove)
+    el.removeEventListener('pointerup', onUp)
+    el.removeEventListener('pointercancel', onUp)
+    window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onUp)
+    if (!active) {
+      drag.value = null
+      return
+    }
+    active = false
+    finishDrag()
+  }
+}
+
+onUnmounted(() => {
+  clearDragChrome()
+})
+
 // ---- Context menu ----
 const menu = ref({ visible: false, x: 0, y: 0, items: [] as ContextMenuItem[] })
 
@@ -261,10 +559,21 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
       </button>
     </div>
 
-    <div class="kb-side-body">
+    <div ref="sideBodyRef" class="kb-side-body">
+      <div
+        v-if="lineTop != null"
+        class="kb-insert-line"
+        :style="{ top: `${lineTop}px` }"
+        aria-hidden="true"
+      />
+
       <!-- 置顶（区头常驻，供拖放命中；空列表时 body 为空） -->
-      <section class="kb-sec">
-        <div class="kb-sec-head">
+      <section class="kb-sec" data-kb-drop="pinned-head">
+        <div
+          class="kb-sec-head"
+          data-kb-drop="pinned-head"
+          :class="{ 'drop-target': isHotContainer('pinned') }"
+        >
           <Pin :size="11" :stroke-width="2" aria-hidden="true" />
           <span>置顶</span>
         </div>
@@ -272,7 +581,15 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
           v-for="s in pinned"
           :key="'pin-' + s.id"
           class="kb-sess"
-          :class="{ on: s.id === activeId, disabled }"
+          data-kb-drop="session"
+          data-kb-zone="pinned"
+          :data-session-id="s.id"
+          :class="{
+            on: s.id === activeId,
+            disabled,
+            'is-dragging': drag?.active && drag.id === s.id && drag.sourceZone === 'pinned',
+          }"
+          @pointerdown="onSessionPointerDown(s, 'pinned', $event)"
           @contextmenu="onSessionContext($event, s)"
         >
           <input
@@ -354,6 +671,9 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
             v-else
             type="button"
             class="kb-proj-row"
+            data-kb-drop="project-row"
+            :data-project-id="block.project.id"
+            :class="{ 'drop-target': isHotContainer(`project-${block.project.id}`) }"
             :disabled="disabled"
             @click="toggleProject(block.project.id)"
             @contextmenu="onProjectContext($event, block.project)"
@@ -368,7 +688,17 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
               v-for="s in block.sessions"
               :key="'p' + block.project.id + '-' + s.id"
               class="kb-sess kb-sess--nested"
-              :class="{ on: s.id === activeId, disabled }"
+              data-kb-drop="session"
+              data-kb-zone="project"
+              :data-session-id="s.id"
+              :data-project-id="block.project.id"
+              :class="{
+                on: s.id === activeId,
+                disabled,
+                'is-dragging':
+                  drag?.active && drag.id === s.id && drag.sourceZone === 'project',
+              }"
+              @pointerdown="onSessionPointerDown(s, 'project', $event)"
               @contextmenu="onSessionContext($event, s)"
             >
               <input
@@ -417,6 +747,7 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
               class="kb-drop-strip"
               data-kb-drop="project-empty"
               :data-project-id="block.project.id"
+              :class="{ 'is-hot': isHotContainer(`project-${block.project.id}`) }"
               aria-hidden="true"
             />
           </template>
@@ -432,15 +763,27 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
       </section>
 
       <!-- 最近 -->
-      <section class="kb-sec">
-        <div class="kb-sec-head">
+      <section class="kb-sec" data-kb-drop="recent-head">
+        <div
+          class="kb-sec-head"
+          data-kb-drop="recent-head"
+          :class="{ 'drop-target': isHotContainer('recent') }"
+        >
           <span>最近</span>
         </div>
         <div
           v-for="s in recent"
           :key="'recent-' + s.id"
           class="kb-sess"
-          :class="{ on: s.id === activeId, disabled }"
+          data-kb-drop="session"
+          data-kb-zone="recent"
+          :data-session-id="s.id"
+          :class="{
+            on: s.id === activeId,
+            disabled,
+            'is-dragging': drag?.active && drag.id === s.id && drag.sourceZone === 'recent',
+          }"
+          @pointerdown="onSessionPointerDown(s, 'recent', $event)"
           @contextmenu="onSessionContext($event, s)"
         >
           <input
@@ -547,10 +890,22 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
 }
 
 .kb-side-body {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   padding: 4px 6px 8px;
+}
+
+.kb-insert-line {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  background: var(--brand-500);
+  border-radius: 1px;
+  pointer-events: none;
+  z-index: 2;
 }
 
 .kb-sec {
@@ -616,6 +971,14 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
 }
 .kb-sess.disabled {
   opacity: 0.55;
+}
+/* 拖中行半透明；指针穿透整行（含子孙），否则 elementFromPoint 永远命中自身 */
+.kb-sess.is-dragging {
+  opacity: 0.45;
+  pointer-events: none;
+}
+.kb-sess.is-dragging * {
+  pointer-events: none;
 }
 .kb-sess--nested {
   padding-left: 24px;
@@ -700,6 +1063,12 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
 .kb-proj-row:hover:not(:disabled) {
   background: color-mix(in srgb, var(--brand-50) 70%, transparent);
   color: var(--text-1);
+}
+.kb-proj-row.drop-target,
+.kb-sec-head.drop-target {
+  background: color-mix(in srgb, var(--brand-500) 18%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--brand-500) 55%, transparent);
+  outline-offset: -1px;
 }
 .kb-chevron {
   width: 12px;
@@ -812,5 +1181,12 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
 .kb-clear:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* 拖拽期间全局禁选 + 抓手光标（body 在组件外，用 :global 整条包进同一括号） */
+:global(body.kb-session-dragging) {
+  cursor: grabbing;
+  user-select: none;
+  -webkit-user-select: none;
 }
 </style>
