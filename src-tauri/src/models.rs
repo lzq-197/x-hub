@@ -507,6 +507,32 @@ pub struct KbSession {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KbSessionZone {
+    Pinned,
+    Recent,
+    Project,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KbPlaceTarget {
+    pub zone: KbSessionZone,
+    /// Required when `zone == Project`
+    pub project_id: Option<i64>,
+    /// Insert before this session id within the target zone list; `None` = append
+    pub before_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KbDragSourceZone {
+    Pinned,
+    Recent,
+    Project,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KbMessage {
     pub id: i64,
