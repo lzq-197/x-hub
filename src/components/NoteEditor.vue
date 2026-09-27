@@ -21,6 +21,8 @@ import { deriveNoteTitle } from '../utils/markdown'
 import { NOTE_EDITOR_MODES, normalizeNoteEditorMode, type NoteEditorMode } from '../utils/noteEditorMode'
 import { getQuickEmojis } from '../utils/emoji'
 import { saveNoteImageFile } from '../utils/noteImage'
+import { findHeadingPosInDoc, findTextRangeInDoc } from '../utils/noteReveal'
+import { offsetsValid, plainForMatch, utf8ByteLength, utf8ByteSlice } from '../utils/utf8Slice'
 import { parseTimestamp } from '../utils/time'
 import EmojiPicker from './EmojiPicker.vue'
 
@@ -37,11 +39,13 @@ import EmojiPicker from './EmojiPicker.vue'
 
 const props = defineProps<{
   note: Readonly<Note> | null
+  reveal?: { mdStart: number; mdEnd: number; heading?: string } | null
 }>()
 
 const emit = defineEmits<{
   (e: 'save', id: number, title: string, content: string): void
   (e: 'delete', id: number): void
+  (e: 'reveal-done'): void
 }>()
 
 const store = useStore()
@@ -54,12 +58,16 @@ const previewEl = ref<HTMLDivElement | null>(null)
 let splitResize: ResizeObserver | null = null
 
 let crepe: Crepe | null = null
+/** Crepe 成功挂载后才允许 reveal；销毁时清零，避免未就绪就 emit reveal-done 冲掉 pending */
+const crepeReadyFlag = ref(false)
 /** 当前 Crepe 挂在哪一个容器上。容器被换掉（v-if 重建）时必须重挂，不能只看 crepe 是否非空。 */
 let mountedOn: HTMLElement | null = null
 let mounting = false
 /** 挂载期间又切换了笔记：完成后需按最新笔记重挂一次（否则编辑器停留旧内容、防抖保存会跨笔记污染） */
 let remountQueued = false
 let detachBlockDrag: (() => void) | null = null
+let revealCollapseTimer: ReturnType<typeof setTimeout> | null = null
+let revealGen = 0
 
 const localTitle = ref('')
 const localContent = ref('')
@@ -93,12 +101,18 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onPreviewKeydown)
   splitResize?.disconnect()
   splitResize = null
+  if (revealCollapseTimer) {
+    clearTimeout(revealCollapseTimer)
+    revealCollapseTimer = null
+  }
+  revealGen++
   void destroyEditor()
 })
 
 async function destroyEditor() {
   detachBlockDrag?.()
   detachBlockDrag = null
+  crepeReadyFlag.value = false
   const c = crepe
   crepe = null
   mountedOn = null
@@ -237,8 +251,10 @@ async function mountEditor(content: string) {
     })
     // 已缓存的图片不会再次触发 load：挂载完成后先按 attrs 同步一次宽度
     syncImageWidths()
+    crepeReadyFlag.value = true
   } catch (e) {
     console.error('Crepe 初始化失败', e)
+    crepeReadyFlag.value = false
   } finally {
     mounting = false
     if (remountQueued && props.note && rootEl.value && mode.value === 'wysiwyg') {
@@ -316,6 +332,77 @@ watch(
     }
     if (next !== mode.value) void applyMode(next, false)
   },
+)
+
+/** 知识库引用：Crepe 就绪后按 UTF-8 字节偏移定位选区；失败静默回退标题，再失败只打开笔记 */
+async function applyReveal() {
+  const r = props.reveal
+  const note = props.note
+  if (!r || !note) return
+  // 源码/分屏先切到所见即所得再定位（不持久化模式，避免改用户偏好）
+  if (mode.value !== 'wysiwyg') {
+    void applyMode('wysiwyg', false)
+    return
+  }
+  if (!crepeReadyFlag.value || !crepe || mounting) return
+
+  const gen = ++revealGen
+  if (revealCollapseTimer) {
+    clearTimeout(revealCollapseTimer)
+    revealCollapseTimer = null
+  }
+
+  const md = localContent.value || note.content || ''
+  const byteLen = utf8ByteLength(md)
+  try {
+    await crepe.editor.action((ctx) => {
+      if (gen !== revealGen) return
+      const view = ctx.get(editorViewCtx)
+      let range: { from: number; to: number } | null = null
+      if (offsetsValid(r.mdStart, r.mdEnd, byteLen)) {
+        const raw = utf8ByteSlice(md, r.mdStart, r.mdEnd)
+        const needle = plainForMatch(raw)
+        range = needle ? findTextRangeInDoc(view.state.doc, needle) : null
+      }
+      if (range) {
+        const tr = view.state.tr
+          .setSelection(TextSelection.create(view.state.doc, range.from, range.to))
+          .scrollIntoView()
+        view.dispatch(tr)
+        const from = range.from
+        const noteId = note.id
+        revealCollapseTimer = setTimeout(() => {
+          revealCollapseTimer = null
+          if (gen !== revealGen || !crepe || props.note?.id !== noteId) return
+          crepe.editor.action((actx) => {
+            const v = actx.get(editorViewCtx)
+            const size = v.state.doc.content.size
+            const pos = Math.min(Math.max(from, 0), size)
+            const sel = TextSelection.create(v.state.doc, pos)
+            v.dispatch(v.state.tr.setSelection(sel))
+          })
+        }, 2000)
+        return
+      }
+      const hPos = r.heading ? findHeadingPosInDoc(view.state.doc, r.heading) : null
+      if (hPos != null) {
+        const sel = TextSelection.findFrom(view.state.doc.resolve(hPos), 1, true)
+        if (sel) view.dispatch(view.state.tr.setSelection(sel).scrollIntoView())
+      }
+    })
+  } catch (e) {
+    console.warn('引用定位失败', e)
+  } finally {
+    if (gen === revealGen) emit('reveal-done')
+  }
+}
+
+watch(
+  () => [props.note?.id, props.reveal?.mdStart, props.reveal?.mdEnd, crepeReadyFlag.value] as const,
+  () => {
+    void nextTick(() => void applyReveal())
+  },
+  { flush: 'post' },
 )
 
 function syncLocal() {

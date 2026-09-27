@@ -28,9 +28,25 @@ import {
 } from '../utils/kbAskDecorate'
 import { kbAskInFlight } from '../utils/kbAskFlight'
 
+export type OpenNotePayload = {
+  noteId: number
+  mdStart?: number | null
+  mdEnd?: number | null
+  heading?: string
+}
+
 const emit = defineEmits<{
-  (e: 'open-note', noteId: number): void
+  (e: 'open-note', payload: OpenNotePayload): void
 }>()
+
+function openCitation(c: Pick<Citation, 'note_id' | 'md_start' | 'md_end' | 'heading'>) {
+  emit('open-note', {
+    noteId: c.note_id,
+    mdStart: c.md_start ?? null,
+    mdEnd: c.md_end ?? null,
+    heading: c.heading || undefined,
+  })
+}
 
 const showToast = inject<(msg: string) => void>('showToast', () => {})
 
@@ -245,9 +261,12 @@ function onAnswerClick(e: MouseEvent) {
   const n = Number(btn.getAttribute('data-ref'))
   if (!Number.isFinite(n)) return
   const root = btn.closest('.kb-msg') as HTMLElement | null
+  const msgId = root?.getAttribute('data-msg-id') ?? ''
+  const msg = messages.value.find((m) => String(m.id) === msgId)
+  const cite = msg?.citations.find((c) => c.index === n)
+  if (cite) openCitation(cite)
   const el = (root ?? document).querySelector(`[data-cite-index="${n}"]`) as HTMLElement | null
   el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-  const msgId = root?.getAttribute('data-msg-id') ?? ''
   flashCite.value = snipKey(msgId, n)
   if (flashTimer) clearTimeout(flashTimer)
   flashTimer = setTimeout(() => {
@@ -819,7 +838,7 @@ watch(embedOpen, (open) => {
           <button
             class="ghost-btn"
             type="button"
-            title="清空并重切全部笔记片段。若「来源」曾乱码：升级本修复后请点一次重建，旧片段才会按正确中文重切"
+            title="清空并重切全部笔记片段。升级后若「来源」曾乱码或要点来源跳到原文位置，请点一次重建（编辑保存也会重切该篇）。"
             :disabled="rebuilding || statusKind === 'indexing'"
             @click="onRebuild"
           >
@@ -903,7 +922,7 @@ watch(embedOpen, (open) => {
                     <button
                       type="button"
                       class="kb-cite-group-head"
-                      @click="emit('open-note', g.note_id)"
+                      @click="openCitation(g.items[0]!)"
                     >
                       <span class="kb-cite-title">{{ g.note_title || '无标题笔记' }}</span>
                       <span class="kb-cite-path">
@@ -923,8 +942,8 @@ watch(embedOpen, (open) => {
                         <button
                           type="button"
                           class="kb-cite-open"
-                          title="打开笔记"
-                          @click="emit('open-note', c.note_id)"
+                          title="打开笔记并定位到引用"
+                          @click="openCitation(c)"
                         >
                           <span class="kb-cite-idx">[{{ c.index }}]</span>
                           <span v-if="c.heading" class="kb-cite-heading-text">{{ c.heading }}</span>

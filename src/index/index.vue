@@ -696,10 +696,37 @@ function onOpenNote(n: Note) {
   searchVisible.value = false
 }
 
-/** 知识库引用来源：按笔记 id 打开速记 */
-function onOpenNoteById(id: number) {
-  activeNoteId.value = id
+/** 知识库引用来源：打开速记，若有 UTF-8 字节偏移则交给 NoteEditor 定位 */
+type NoteReveal = {
+  noteId: number
+  mdStart: number
+  mdEnd: number
+  heading?: string
+}
+const pendingReveal = ref<NoteReveal | null>(null)
+
+function onOpenNoteById(
+  payload: number | { noteId: number; mdStart?: number | null; mdEnd?: number | null; heading?: string },
+) {
+  const noteId = typeof payload === 'number' ? payload : payload.noteId
+  activeNoteId.value = noteId
   activeView.value = 'notes'
+  if (
+    typeof payload !== 'number' &&
+    typeof payload.mdStart === 'number' &&
+    typeof payload.mdEnd === 'number' &&
+    payload.mdStart >= 0 &&
+    payload.mdEnd > payload.mdStart
+  ) {
+    pendingReveal.value = {
+      noteId,
+      mdStart: payload.mdStart,
+      mdEnd: payload.mdEnd,
+      heading: payload.heading,
+    }
+  } else {
+    pendingReveal.value = null
+  }
 }
 
 // ---- 轻提示 ----
@@ -887,8 +914,10 @@ provide('showToast', showToast)
             />
             <NoteEditor
               :note="activeNote"
+              :reveal="pendingReveal && pendingReveal.noteId === activeNote?.id ? pendingReveal : null"
               @save="onSaveNote"
               @delete="onDeleteNote"
+              @reveal-done="pendingReveal = null"
             />
           </div>
         </section>
