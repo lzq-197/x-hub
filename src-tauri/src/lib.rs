@@ -548,6 +548,8 @@ pub fn run() {
             knowledge::delete_kb_session,
             knowledge::pin_kb_session,
             knowledge::move_kb_session_to_project,
+            knowledge::place_kb_session,
+            knowledge::reorder_kb_sessions,
             knowledge::clear_kb_sessions,
             knowledge::list_kb_messages,
             knowledge::set_kb_active_session,

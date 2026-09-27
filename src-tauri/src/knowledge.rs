@@ -3,7 +3,8 @@
 use crate::commands::DbState;
 use crate::models::{
     ChatMessage, Citation, EmbedTestResult, ImportResult, IndexProgressEvent, KbAskEvent,
-    KbChunkHit, KbEmbedConfigView, KbMessage, KbProject, KbSession, KbStatus,
+    KbChunkHit, KbDragSourceZone, KbEmbedConfigView, KbMessage, KbPlaceTarget, KbProject,
+    KbSession, KbSessionZone, KbStatus,
 };
 use crate::repo::{folder, kb_chat, knowledge as kb_repo, note};
 use rusqlite::Connection;
@@ -1184,6 +1185,28 @@ pub fn move_kb_session_to_project(
 ) -> Result<KbSession, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     kb_chat::move_to_project(&conn, id, project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn place_kb_session(
+    state: State<'_, DbState>,
+    id: i64,
+    source_zone: KbDragSourceZone,
+    target: KbPlaceTarget,
+) -> Result<KbSession, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::place_session(&conn, id, source_zone, &target).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn reorder_kb_sessions(
+    state: State<'_, DbState>,
+    zone: KbSessionZone,
+    project_id: Option<i64>,
+    ids: Vec<i64>,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    kb_chat::reorder_sessions(&conn, zone, project_id, &ids).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
