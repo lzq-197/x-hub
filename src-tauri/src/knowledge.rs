@@ -850,8 +850,9 @@ pub async fn kb_ask(
                 e.to_string()
             }
         })?;
+        // 落盘 UI 选中的模型 id/入口名（含平台入口），勿写成 RR 解析出的具体 platform:* 
         if !model_id.trim().is_empty() {
-            kb_chat::set_session_model(&conn, session_id, &model.name)
+            kb_chat::set_session_model(&conn, session_id, model_id.trim())
                 .map_err(|e| e.to_string())?;
         }
         kb_chat::add_message(&conn, session_id, "user", &question, None)
@@ -1058,6 +1059,7 @@ pub async fn kb_test_embed(
 // ---------- 知识库会话 CRUD ----------
 
 fn write_kb_active_session(id: Option<i64>) -> Result<(), String> {
+    let _guard = crate::config::lock();
     let mut cfg = crate::config::load();
     cfg.kb_active_session_id = id;
     crate::config::save(&cfg)
@@ -1069,8 +1071,29 @@ pub fn list_kb_projects(state: State<'_, DbState>) -> Result<Vec<KbProject>, Str
     kb_chat::list_projects(&conn).map_err(|e| e.to_string())
 }
 
+fn normalize_kb_project_name(name: String) -> Result<String, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("项目名称不能为空".into());
+    }
+    Ok(name)
+}
+
+#[cfg(test)]
+mod project_name_tests {
+    use super::normalize_kb_project_name;
+
+    #[test]
+    fn rejects_blank_project_name() {
+        assert!(normalize_kb_project_name("".into()).is_err());
+        assert!(normalize_kb_project_name("   ".into()).is_err());
+        assert_eq!(normalize_kb_project_name("  开源  ".into()).unwrap(), "开源");
+    }
+}
+
 #[tauri::command]
 pub fn create_kb_project(state: State<'_, DbState>, name: String) -> Result<KbProject, String> {
+    let name = normalize_kb_project_name(name)?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let p = kb_chat::create_project(&conn, &name).map_err(|e| e.to_string())?;
     log::info!("新建知识库项目: id={} name={}", p.id, p.name);
@@ -1083,6 +1106,7 @@ pub fn rename_kb_project(
     id: i64,
     name: String,
 ) -> Result<KbProject, String> {
+    let name = normalize_kb_project_name(name)?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     kb_chat::rename_project(&conn, id, &name).map_err(|e| e.to_string())
 }

@@ -244,13 +244,6 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
   if (props.disabled) return
   openMenu(e, sessionMenuItems(s))
 }
-
-function onSessKey(e: KeyboardEvent, id: number) {
-  if (e.key === 'Enter' || e.key === ' ') {
-    e.preventDefault()
-    onSelect(id)
-  }
-}
 </script>
 
 <template>
@@ -274,12 +267,6 @@ function onSessKey(e: KeyboardEvent, id: number) {
           :key="'pin-' + s.id"
           class="kb-sess"
           :class="{ on: s.id === activeId, disabled }"
-          role="button"
-          :tabindex="disabled ? -1 : 0"
-          :aria-disabled="disabled"
-          :title="s.title"
-          @click="onSelect(s.id)"
-          @keydown="onSessKey($event, s.id)"
           @contextmenu="onSessionContext($event, s)"
         >
           <input
@@ -294,7 +281,15 @@ function onSessKey(e: KeyboardEvent, id: number) {
             @blur="commitEdit"
           />
           <template v-else>
-            <span class="kb-sess-title">{{ s.title }}</span>
+            <button
+              type="button"
+              class="kb-sess-main"
+              :disabled="disabled"
+              :title="s.title"
+              @click="onSelect(s.id)"
+            >
+              <span class="kb-sess-title">{{ s.title }}</span>
+            </button>
             <button
               type="button"
               class="kb-more"
@@ -368,12 +363,6 @@ function onSessKey(e: KeyboardEvent, id: number) {
               :key="'p' + block.project.id + '-' + s.id"
               class="kb-sess kb-sess--nested"
               :class="{ on: s.id === activeId, disabled }"
-              role="button"
-              :tabindex="disabled ? -1 : 0"
-              :aria-disabled="disabled"
-              :title="s.title"
-              @click="onSelect(s.id)"
-              @keydown="onSessKey($event, s.id)"
               @contextmenu="onSessionContext($event, s)"
             >
               <input
@@ -388,16 +377,24 @@ function onSessKey(e: KeyboardEvent, id: number) {
                 @blur="commitEdit"
               />
               <template v-else>
-                <span class="kb-sess-title">
-                  <Pin
-                    v-if="s.pinned"
-                    class="kb-sess-pin"
-                    :size="10"
-                    :stroke-width="2.2"
-                    aria-hidden="true"
-                  />
-                  {{ s.title }}
-                </span>
+                <button
+                  type="button"
+                  class="kb-sess-main"
+                  :disabled="disabled"
+                  :title="s.title"
+                  @click="onSelect(s.id)"
+                >
+                  <span class="kb-sess-title">
+                    <Pin
+                      v-if="s.pinned"
+                      class="kb-sess-pin"
+                      :size="10"
+                      :stroke-width="2.2"
+                      aria-hidden="true"
+                    />
+                    {{ s.title }}
+                  </span>
+                </button>
                 <button
                   type="button"
                   class="kb-more"
@@ -432,12 +429,6 @@ function onSessKey(e: KeyboardEvent, id: number) {
           :key="'recent-' + s.id"
           class="kb-sess"
           :class="{ on: s.id === activeId, disabled }"
-          role="button"
-          :tabindex="disabled ? -1 : 0"
-          :aria-disabled="disabled"
-          :title="s.title"
-          @click="onSelect(s.id)"
-          @keydown="onSessKey($event, s.id)"
           @contextmenu="onSessionContext($event, s)"
         >
           <input
@@ -452,7 +443,15 @@ function onSessKey(e: KeyboardEvent, id: number) {
             @blur="commitEdit"
           />
           <template v-else>
-            <span class="kb-sess-title">{{ s.title }}</span>
+            <button
+              type="button"
+              class="kb-sess-main"
+              :disabled="disabled"
+              :title="s.title"
+              @click="onSelect(s.id)"
+            >
+              <span class="kb-sess-title">{{ s.title }}</span>
+            </button>
             <button
               type="button"
               class="kb-more"
@@ -584,7 +583,7 @@ function onSessKey(e: KeyboardEvent, id: number) {
   align-items: center;
   gap: 4px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 2px 4px 2px 4px;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -592,8 +591,6 @@ function onSessKey(e: KeyboardEvent, id: number) {
   font-size: 0.8125rem;
   font-family: inherit;
   text-align: left;
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s;
   box-sizing: border-box;
 }
 .kb-sess:hover:not(.disabled) {
@@ -607,10 +604,29 @@ function onSessKey(e: KeyboardEvent, id: number) {
 }
 .kb-sess.disabled {
   opacity: 0.55;
-  cursor: not-allowed;
 }
 .kb-sess--nested {
-  padding-left: 28px;
+  padding-left: 24px;
+}
+.kb-sess-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 4px 4px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.kb-sess-main:disabled {
+  cursor: not-allowed;
 }
 .kb-sess-title {
   flex: 1;
@@ -636,7 +652,7 @@ function onSessKey(e: KeyboardEvent, id: number) {
   font-size: 0.75rem;
   line-height: 1;
   padding: 2px 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-family: inherit;
 }

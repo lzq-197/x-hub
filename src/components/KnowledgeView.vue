@@ -26,6 +26,7 @@ import {
   groupCitationsByNote,
   linkifyCiteRefs,
 } from '../utils/kbAskDecorate'
+import { kbAskInFlight } from '../utils/kbAskFlight'
 
 const emit = defineEmits<{
   (e: 'open-note', noteId: number): void
@@ -207,9 +208,6 @@ type UiMessage = {
   error: string
   streaming: boolean
 }
-
-/** Survives remount — blocks a second kbAsk while the first stream still writes to DB. */
-const kbAskInFlight = new Set<number>()
 
 const projects = ref<KbProject[]>([])
 const sessions = ref<KbSession[]>([])
@@ -703,6 +701,7 @@ async function submitAsk() {
   await scrollMessagesBottom()
 
   let askFailed = false
+  let askErrorMsg = ''
   try {
     await tauriApi.kbAsk(sessionId, q, selectedModel.value, askTopK.value, (e: KbAskEvent) => {
       if (e.type === 'chunk') {
@@ -728,6 +727,7 @@ async function submitAsk() {
         if (e.kbStatus) status.value = e.kbStatus
       } else if (e.type === 'error') {
         askFailed = true
+        askErrorMsg = e.message
         const partial = e.partial ?? ''
         if (partial) {
           const d = decorateContent(partial, [], {
@@ -747,19 +747,20 @@ async function submitAsk() {
         }
       }
     })
-    // 成功：以库为准刷新（标题 / updated_at / 消息 id）；失败不落 assistant，保留错误气泡
-    if (!askFailed) {
-      messages.value = mapMessages(await tauriApi.listKbMessages(sessionId))
-    }
+    // 始终以库为准回刷：失败时库中只有 user、无 assistant，避免乐观气泡与 DB 长期漂移
+    messages.value = mapMessages(await tauriApi.listKbMessages(sessionId))
+    if (askFailed && askErrorMsg) showToast(askErrorMsg)
     await refreshSessionLists()
     await scrollMessagesBottom()
   } catch (e) {
-    patchStreamingAssistant({ error: String(e), streaming: false })
+    const msg = String(e)
     try {
+      messages.value = mapMessages(await tauriApi.listKbMessages(sessionId))
       await refreshSessionLists()
     } catch {
-      /* ignore */
+      patchStreamingAssistant({ error: msg, streaming: false })
     }
+    showToast(msg)
   } finally {
     kbAskInFlight.delete(sessionId)
     asking.value = false
