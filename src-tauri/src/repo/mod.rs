@@ -1,5 +1,6 @@
 pub mod countdown;
 pub mod chat;
+pub mod kb_chat;
 pub mod clipboard;
 pub mod detached_sticky;
 pub mod folder;
