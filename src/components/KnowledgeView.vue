@@ -13,8 +13,10 @@ import {
   type ChatModelConfig,
   type Citation,
   type KbAskEvent,
+  type KbDragSourceZone,
   type KbEmbedConfigView,
   type KbMessage,
+  type KbPlaceTarget,
   type KbProject,
   type KbSession,
   type KbStatus,
@@ -469,6 +471,23 @@ async function onMoveSession(id: number, projectId: number | null) {
   }
 }
 
+async function onPlaceSession(
+  id: number,
+  sourceZone: KbDragSourceZone,
+  target: KbPlaceTarget,
+) {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  try {
+    await tauriApi.placeKbSession(id, sourceZone, target)
+    await refreshSessionLists()
+  } catch (e) {
+    showToast(`移动失败：${String(e)}`)
+  }
+}
+
 async function onDeleteSession(id: number) {
   if (asking.value) {
     showToast('生成中，请稍候')
@@ -861,6 +880,7 @@ watch(embedOpen, (open) => {
           @rename="onRenameSession"
           @pin="onPinSession"
           @move="onMoveSession"
+          @place="onPlaceSession"
           @delete="onDeleteSession"
           @clear-all="onClearAllRequest"
           @create-project="onCreateProject"

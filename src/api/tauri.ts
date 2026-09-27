@@ -936,8 +936,19 @@ export interface KbSession {
   model_name: string
   project_id: number | null
   pinned: boolean
+  sort_order: number
+  pin_sort_order: number
   created_at: string
   updated_at: string
+}
+
+export type KbSessionZone = 'pinned' | 'recent' | 'project'
+export type KbDragSourceZone = 'pinned' | 'recent' | 'project'
+
+export interface KbPlaceTarget {
+  zone: KbSessionZone
+  projectId?: number | null
+  beforeId?: number | null
 }
 
 export interface KbMessage {
@@ -1072,6 +1083,30 @@ export const tauriApi = {
     invoke<KbSession>('pin_kb_session', { id, pinned }),
   moveKbSessionToProject: (id: number, projectId: number | null) =>
     invoke<KbSession>('move_kb_session_to_project', { id, projectId }),
+  placeKbSession: (
+    id: number,
+    sourceZone: KbDragSourceZone,
+    target: KbPlaceTarget,
+  ) =>
+    invoke<KbSession>('place_kb_session', {
+      id,
+      sourceZone,
+      target: {
+        zone: target.zone,
+        projectId: target.projectId ?? null,
+        beforeId: target.beforeId ?? null,
+      },
+    }),
+  reorderKbSessions: (
+    zone: KbSessionZone,
+    ids: number[],
+    projectId?: number | null,
+  ) =>
+    invoke<void>('reorder_kb_sessions', {
+      zone,
+      projectId: projectId ?? null,
+      ids,
+    }),
   clearKbSessions: () => invoke<void>('clear_kb_sessions'),
   listKbMessages: (sessionId: number) =>
     invoke<KbMessage[]>('list_kb_messages', { sessionId }),
