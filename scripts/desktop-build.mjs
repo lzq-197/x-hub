@@ -14,6 +14,10 @@ import {
   readConfVersion,
   writeConfVersion,
 } from './lib/desktop-build-version.mjs'
+import {
+  shouldOpenArtifactDir,
+  artifactOpenCommand,
+} from './lib/desktop-build-open.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const confPath = join(root, 'src-tauri', 'tauri.conf.json')
@@ -139,6 +143,14 @@ function copyArtifact(version) {
   return dest
 }
 
+function openArtifactDir(dir) {
+  const { cmd, args } = artifactOpenCommand(process.platform, dir)
+  const r = run(cmd, args, { stdio: 'ignore' })
+  if (r.error) {
+    console.warn(`[desktop-build] could not open folder ${dir}: ${r.error.message}`)
+  }
+}
+
 assertCleanTree()
 assertXhubNotRunning()
 
@@ -147,6 +159,7 @@ let preStampConfText = null
 let stampedVersion = null
 let buildFailed = null
 let restoreFailed = false
+let destPath = null
 
 try {
   switchForChannel()
@@ -154,7 +167,7 @@ try {
   stampedVersion = stampVersion(preStampConfText)
   console.log(`[desktop-build] channel=${channel} version=${stampedVersion}`)
   runOrDie('pnpm', ['exec', 'tauri', 'build'], 'tauri build')
-  const destPath = copyArtifact(stampedVersion)
+  destPath = copyArtifact(stampedVersion)
   console.log(`[desktop-build] OK ${resolve(destPath)}`)
 } catch (e) {
   buildFailed = e
@@ -176,4 +189,7 @@ try {
   }
 }
 
+if (shouldOpenArtifactDir({ buildFailed, restoreFailed, destPath })) {
+  openArtifactDir(dirname(destPath))
+}
 if (buildFailed || restoreFailed) process.exit(1)
