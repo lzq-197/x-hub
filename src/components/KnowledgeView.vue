@@ -208,6 +208,9 @@ type UiMessage = {
   streaming: boolean
 }
 
+/** Survives remount — blocks a second kbAsk while the first stream still writes to DB. */
+const kbAskInFlight = new Set<number>()
+
 const projects = ref<KbProject[]>([])
 const sessions = ref<KbSession[]>([])
 const activeSessionId = ref<number | null>(null)
@@ -215,6 +218,7 @@ const messages = ref<UiMessage[]>([])
 const asking = ref(false)
 const clearOpen = ref(false)
 const messagesEl = ref<HTMLElement | null>(null)
+let askFlightPollTimer: ReturnType<typeof setInterval> | null = null
 
 const expandedSnips = ref<Set<string>>(new Set())
 const flashCite = ref<string | null>(null)
@@ -330,6 +334,42 @@ async function refreshSessionLists() {
   projects.value = await tauriApi.listKbProjects()
 }
 
+function stopAskFlightPoll() {
+  if (askFlightPollTimer) {
+    clearInterval(askFlightPollTimer)
+    askFlightPollTimer = null
+  }
+}
+
+/** After remount: restore asking UI + poll messages until the in-flight ask leaves the set. */
+function syncAskingFromInFlight(sessionId: number) {
+  stopAskFlightPoll()
+  if (!kbAskInFlight.has(sessionId)) return
+  asking.value = true
+  askFlightPollTimer = setInterval(async () => {
+    if (!kbAskInFlight.has(sessionId)) {
+      stopAskFlightPoll()
+      asking.value = false
+      if (activeSessionId.value === sessionId) {
+        try {
+          messages.value = mapMessages(await tauriApi.listKbMessages(sessionId))
+          await refreshSessionLists()
+          await scrollMessagesBottom()
+        } catch {
+          /* ignore */
+        }
+      }
+      return
+    }
+    if (activeSessionId.value !== sessionId) return
+    try {
+      messages.value = mapMessages(await tauriApi.listKbMessages(sessionId))
+    } catch {
+      /* ignore */
+    }
+  }, 500)
+}
+
 async function openSession(id: number) {
   if (asking.value) {
     showToast('生成中，请稍候')
@@ -343,6 +383,7 @@ async function openSession(id: number) {
   const s = sessions.value.find((x) => x.id === id)
   if (s?.model_name) selectedModel.value = displayModelName(s.model_name) || selectedModel.value
   await scrollMessagesBottom()
+  syncAskingFromInFlight(id)
 }
 
 async function bootstrapSessions() {
@@ -621,6 +662,12 @@ async function submitAsk() {
     }
   }
 
+  if (kbAskInFlight.has(sessionId)) {
+    showToast('该会话正在生成中')
+    return
+  }
+  kbAskInFlight.add(sessionId)
+
   asking.value = true
   question.value = ''
   messages.value.push({
@@ -704,6 +751,7 @@ async function submitAsk() {
       /* ignore */
     }
   } finally {
+    kbAskInFlight.delete(sessionId)
     asking.value = false
   }
 }
@@ -725,6 +773,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (pollTimer) clearTimeout(pollTimer)
   if (flashTimer) clearTimeout(flashTimer)
+  stopAskFlightPoll()
 })
 
 watch(embedOpen, (open) => {
