@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { BrainCircuit, RefreshCw, Settings2, Send, X } from 'lucide-vue-next'
 import AppSelect from './AppSelect.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
+import KbSessionSidebar from './KbSessionSidebar.vue'
 import { useFocusTrap } from '../composables/useFocusTrap'
 import {
   PLATFORM_ENTRY_NAME,
@@ -12,6 +14,9 @@ import {
   type Citation,
   type KbAskEvent,
   type KbEmbedConfigView,
+  type KbMessage,
+  type KbProject,
+  type KbSession,
   type KbStatus,
 } from '../api/tauri'
 import { renderMarkdown } from '../utils/markdownHtml'
@@ -191,31 +196,43 @@ async function testEmbed() {
   }
 }
 
-// ---- 问答 ----
-const models = ref<ChatModelConfig[]>([])
-const accountLoggedIn = ref(false)
-const selectedModel = ref('')
-const askTopK = ref(6)
-const question = ref('')
+// ---- 会话 / 消息 ----
+type UiMessage = {
+  id: number | string
+  role: 'user' | 'assistant'
+  content: string
+  citations: Citation[]
+  html: string
+  banner: string | null
+  error: string
+  streaming: boolean
+}
+
+const projects = ref<KbProject[]>([])
+const sessions = ref<KbSession[]>([])
+const activeSessionId = ref<number | null>(null)
+const messages = ref<UiMessage[]>([])
 const asking = ref(false)
-const streamText = ref('')
-const streamHtml = ref('')
-const answerError = ref('')
-const citations = ref<Citation[]>([])
-const noHit = ref(false)
-const askedOnce = ref(false)
-const clarifyBanner = ref<string | null>(null)
-const expandedSnips = ref<Set<number>>(new Set())
-const flashCite = ref<number | null>(null)
-const citationsRootRef = ref<HTMLElement | null>(null)
+const clearOpen = ref(false)
+const messagesEl = ref<HTMLElement | null>(null)
+
+const expandedSnips = ref<Set<string>>(new Set())
+const flashCite = ref<string | null>(null)
 let flashTimer: ReturnType<typeof setTimeout> | null = null
 
-const citeGroups = computed(() => groupCitationsByNote(citations.value))
+function snipKey(msgId: number | string, index: number) {
+  return `${msgId}:${index}`
+}
 
-function toggleSnip(index: number) {
+function citeGroupsFor(cites: Citation[]) {
+  return groupCitationsByNote(cites)
+}
+
+function toggleSnip(msgId: number | string, index: number) {
+  const key = snipKey(msgId, index)
   const next = new Set(expandedSnips.value)
-  if (next.has(index)) next.delete(index)
-  else next.add(index)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
   expandedSnips.value = next
 }
 
@@ -225,39 +242,275 @@ function onAnswerClick(e: MouseEvent) {
   if (!btn) return
   const n = Number(btn.getAttribute('data-ref'))
   if (!Number.isFinite(n)) return
-  const root = citationsRootRef.value
+  const root = btn.closest('.kb-msg') as HTMLElement | null
   const el = (root ?? document).querySelector(`[data-cite-index="${n}"]`) as HTMLElement | null
   el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-  flashCite.value = n
+  const msgId = root?.getAttribute('data-msg-id') ?? ''
+  flashCite.value = snipKey(msgId, n)
   if (flashTimer) clearTimeout(flashTimer)
   flashTimer = setTimeout(() => {
     flashCite.value = null
   }, 1200)
 }
 
-/** Stream: strip clarify into banner (no linkify). Done: + heuristic + linkify. */
-function paintAnswer(raw: string, opts: { linkify: boolean; heuristic: boolean }) {
+function decorateContent(
+  raw: string,
+  citations: Citation[],
+  opts: { linkify: boolean; heuristic: boolean; userQuestion?: string },
+): { html: string; banner: string | null } {
   const { banner, body } = stripClarification(raw)
   let msg = banner
-  if (!msg && opts.heuristic) {
+  if (!msg && opts.heuristic && opts.userQuestion) {
     msg = confusionHint(
-      question.value,
-      citations.value.map((c) => ({ note_title: c.note_title, heading: c.heading })),
+      opts.userQuestion,
+      citations.map((c) => ({ note_title: c.note_title, heading: c.heading })),
     )
   }
-  clarifyBanner.value = msg
   const html = renderMarkdown(body)
   if (opts.linkify) {
-    const idxs = citations.value.map((c) => c.index)
-    streamHtml.value = linkifyCiteRefs(html, idxs)
-  } else {
-    streamHtml.value = html
+    return { html: linkifyCiteRefs(html, citations.map((c) => c.index)), banner: msg }
+  }
+  return { html, banner: msg }
+}
+
+function parseCitations(raw: string | null): Citation[] {
+  if (!raw) return []
+  try {
+    const v = JSON.parse(raw) as unknown
+    return Array.isArray(v) ? (v as Citation[]) : []
+  } catch {
+    return []
   }
 }
 
-function decorateAnswer(raw: string) {
-  paintAnswer(raw, { linkify: true, heuristic: true })
+function parseMsg(m: KbMessage, prevUserQuestion?: string): UiMessage {
+  const role = m.role === 'assistant' ? 'assistant' : 'user'
+  const citations = role === 'assistant' ? parseCitations(m.citations_json) : []
+  const base: UiMessage = {
+    id: m.id,
+    role,
+    content: m.content,
+    citations,
+    html: '',
+    banner: null,
+    error: '',
+    streaming: false,
+  }
+  if (role === 'assistant') {
+    const d = decorateContent(m.content, citations, {
+      linkify: true,
+      heuristic: true,
+      userQuestion: prevUserQuestion,
+    })
+    base.html = d.html
+    base.banner = d.banner
+  }
+  return base
 }
+
+function mapMessages(rows: KbMessage[]): UiMessage[] {
+  const out: UiMessage[] = []
+  let prevUser = ''
+  for (const row of rows) {
+    const ui = parseMsg(row, prevUser || undefined)
+    out.push(ui)
+    if (ui.role === 'user') prevUser = ui.content
+  }
+  return out
+}
+
+async function scrollMessagesBottom() {
+  await nextTick()
+  const el = messagesEl.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+
+async function refreshSessionLists() {
+  sessions.value = await tauriApi.listKbSessions()
+  projects.value = await tauriApi.listKbProjects()
+}
+
+async function openSession(id: number) {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  activeSessionId.value = id
+  await tauriApi.setKbActiveSession(id)
+  messages.value = mapMessages(await tauriApi.listKbMessages(id))
+  expandedSnips.value = new Set()
+  flashCite.value = null
+  const s = sessions.value.find((x) => x.id === id)
+  if (s?.model_name) selectedModel.value = displayModelName(s.model_name) || selectedModel.value
+  await scrollMessagesBottom()
+}
+
+async function bootstrapSessions() {
+  if (!isTauri()) return
+  projects.value = await tauriApi.listKbProjects()
+  sessions.value = await tauriApi.listKbSessions()
+  const cfg = await tauriApi.getUiConfig()
+  const want = cfg.kb_active_session_id ?? null
+  const ok = want != null && sessions.value.some((s) => s.id === want)
+  if (ok) await openSession(want!)
+  else if (sessions.value.length) {
+    const recent = sessions.value.find((s) => !s.pinned && s.project_id == null)
+    await openSession((recent ?? sessions.value[0]!).id)
+  } else {
+    activeSessionId.value = null
+    messages.value = []
+  }
+}
+
+async function onNewSession() {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  if (!isTauri()) return
+  try {
+    const s = await tauriApi.createKbSession({
+      modelName: selectedModel.value || null,
+    })
+    await refreshSessionLists()
+    await openSession(s.id)
+  } catch (e) {
+    showToast(`新建失败：${String(e)}`)
+  }
+}
+
+async function onRenameSession(id: number, title: string) {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  try {
+    await tauriApi.renameKbSession(id, title)
+    await refreshSessionLists()
+  } catch (e) {
+    showToast(`重命名失败：${String(e)}`)
+  }
+}
+
+async function onPinSession(id: number, pinned: boolean) {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  try {
+    await tauriApi.pinKbSession(id, pinned)
+    await refreshSessionLists()
+  } catch (e) {
+    showToast(`操作失败：${String(e)}`)
+  }
+}
+
+async function onMoveSession(id: number, projectId: number | null) {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  try {
+    await tauriApi.moveKbSessionToProject(id, projectId)
+    await refreshSessionLists()
+  } catch (e) {
+    showToast(`移动失败：${String(e)}`)
+  }
+}
+
+async function onDeleteSession(id: number) {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  try {
+    await tauriApi.deleteKbSession(id)
+    await refreshSessionLists()
+    if (activeSessionId.value === id) {
+      if (sessions.value.length) {
+        const recent = sessions.value.find((s) => !s.pinned && s.project_id == null)
+        await openSession((recent ?? sessions.value[0]!).id)
+      } else {
+        activeSessionId.value = null
+        messages.value = []
+        await tauriApi.setKbActiveSession(null)
+      }
+    }
+  } catch (e) {
+    showToast(`删除失败：${String(e)}`)
+  }
+}
+
+async function onCreateProject(name: string) {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  try {
+    await tauriApi.createKbProject(name)
+    await refreshSessionLists()
+  } catch (e) {
+    showToast(`创建项目失败：${String(e)}`)
+  }
+}
+
+async function onRenameProject(id: number, name: string) {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  try {
+    await tauriApi.renameKbProject(id, name)
+    await refreshSessionLists()
+  } catch (e) {
+    showToast(`重命名失败：${String(e)}`)
+  }
+}
+
+async function onDeleteProject(id: number) {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  try {
+    await tauriApi.deleteKbProject(id)
+    await refreshSessionLists()
+  } catch (e) {
+    showToast(`删除项目失败：${String(e)}`)
+  }
+}
+
+function onClearAllRequest() {
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  clearOpen.value = true
+}
+
+async function onClearConfirm() {
+  clearOpen.value = false
+  if (asking.value) {
+    showToast('生成中，请稍候')
+    return
+  }
+  try {
+    await tauriApi.clearKbSessions()
+    await refreshSessionLists()
+    activeSessionId.value = null
+    messages.value = []
+    await tauriApi.setKbActiveSession(null)
+  } catch (e) {
+    showToast(`清空失败：${String(e)}`)
+  }
+}
+
+// ---- 问答 ----
+const models = ref<ChatModelConfig[]>([])
+const accountLoggedIn = ref(false)
+const selectedModel = ref('')
+const askTopK = ref(6)
+const question = ref('')
 
 const platformEnabled = computed(() => models.value.some((m) => isPlatformModel(m)))
 
@@ -321,6 +574,15 @@ function onAskKeydown(e: KeyboardEvent) {
   }
 }
 
+function patchStreamingAssistant(patch: Partial<UiMessage>) {
+  const list = messages.value
+  const last = list[list.length - 1]
+  if (!last || last.role !== 'assistant' || !last.streaming) return
+  Object.assign(last, patch)
+  // trigger reactivity for array item mutation
+  messages.value = list.slice()
+}
+
 async function submitAsk() {
   const q = question.value.trim()
   if (!q || asking.value || !isTauri()) return
@@ -345,40 +607,102 @@ async function submitAsk() {
     }
   }
 
-  asking.value = true
-  askedOnce.value = true
-  streamText.value = ''
-  streamHtml.value = ''
-  answerError.value = ''
-  citations.value = []
-  noHit.value = false
-  clarifyBanner.value = null
-  expandedSnips.value = new Set()
-  flashCite.value = null
+  let sessionId = activeSessionId.value
+  if (sessionId == null) {
+    try {
+      const s = await tauriApi.createKbSession({ modelName: selectedModel.value })
+      await refreshSessionLists()
+      activeSessionId.value = s.id
+      await tauriApi.setKbActiveSession(s.id)
+      sessionId = s.id
+    } catch (e) {
+      showToast(`创建会话失败：${String(e)}`)
+      return
+    }
+  }
 
+  asking.value = true
+  question.value = ''
+  messages.value.push({
+    id: `u-${Date.now()}`,
+    role: 'user',
+    content: q,
+    citations: [],
+    html: '',
+    banner: null,
+    error: '',
+    streaming: false,
+  })
+  messages.value.push({
+    id: `a-${Date.now()}`,
+    role: 'assistant',
+    content: '',
+    citations: [],
+    html: '',
+    banner: null,
+    error: '',
+    streaming: true,
+  })
+  await scrollMessagesBottom()
+
+  let askFailed = false
   try {
-    // Task 5 临时：无会话 UI 时先建会话再问；Task 7 接侧栏后改为复用 activeSession
-    const session = await tauriApi.createKbSession({ modelName: selectedModel.value })
-    await tauriApi.kbAsk(session.id, q, selectedModel.value, askTopK.value, (e: KbAskEvent) => {
+    await tauriApi.kbAsk(sessionId, q, selectedModel.value, askTopK.value, (e: KbAskEvent) => {
       if (e.type === 'chunk') {
-        streamText.value += e.content
-        paintAnswer(streamText.value, { linkify: false, heuristic: false })
+        const last = messages.value[messages.value.length - 1]
+        const next = (last?.content ?? '') + e.content
+        const d = decorateContent(next, [], { linkify: false, heuristic: false })
+        patchStreamingAssistant({ content: next, html: d.html, banner: d.banner })
+        void scrollMessagesBottom()
       } else if (e.type === 'done') {
-        streamText.value = e.answer
-        citations.value = e.citations
-        noHit.value = e.citations.length === 0
-        decorateAnswer(e.answer)
+        const d = decorateContent(e.answer, e.citations, {
+          linkify: true,
+          heuristic: true,
+          userQuestion: q,
+        })
+        patchStreamingAssistant({
+          content: e.answer,
+          citations: e.citations,
+          html: d.html,
+          banner: d.banner,
+          streaming: false,
+          error: '',
+        })
         if (e.kbStatus) status.value = e.kbStatus
       } else if (e.type === 'error') {
-        answerError.value = e.message
-        if (e.partial) {
-          streamText.value = e.partial
-          decorateAnswer(e.partial)
+        askFailed = true
+        const partial = e.partial ?? ''
+        if (partial) {
+          const d = decorateContent(partial, [], {
+            linkify: true,
+            heuristic: true,
+            userQuestion: q,
+          })
+          patchStreamingAssistant({
+            content: partial,
+            html: d.html,
+            banner: d.banner,
+            error: e.message,
+            streaming: false,
+          })
+        } else {
+          patchStreamingAssistant({ error: e.message, streaming: false })
         }
       }
     })
+    // 成功：以库为准刷新（标题 / updated_at / 消息 id）；失败不落 assistant，保留错误气泡
+    if (!askFailed) {
+      messages.value = mapMessages(await tauriApi.listKbMessages(sessionId))
+    }
+    await refreshSessionLists()
+    await scrollMessagesBottom()
   } catch (e) {
-    answerError.value = String(e)
+    patchStreamingAssistant({ error: String(e), streaming: false })
+    try {
+      await refreshSessionLists()
+    } catch {
+      /* ignore */
+    }
   } finally {
     asking.value = false
   }
@@ -393,6 +717,7 @@ onMounted(async () => {
     } catch {
       /* 默认 6 */
     }
+    await bootstrapSessions()
   }
   schedulePoll()
 })
@@ -453,119 +778,174 @@ watch(embedOpen, (open) => {
         <button class="kb-link" type="button" @click="openEmbedSettings">打开嵌入设置</button>
       </p>
 
-      <!-- 问答区（全宽，无地图/标签云） -->
-      <div class="kb-ask">
-        <div class="kb-ask-toolbar">
-          <AppSelect
-            v-model="selectedModel"
-            class="kb-model-select"
-            :options="modelOptions"
-            :disabled="asking || modelOptions.length === 0"
-            aria-label="对话模型"
-            compact
-          />
-          <AppSelect
-            v-model="topKValue"
-            class="kb-topk-select"
-            :options="topKOptions"
-            :disabled="asking"
-            aria-label="检索条数"
-            compact
-          />
-        </div>
+      <div class="kb-body">
+        <KbSessionSidebar
+          :sessions="sessions"
+          :projects="projects"
+          :active-id="activeSessionId"
+          :disabled="asking"
+          @new="onNewSession"
+          @select="openSession"
+          @rename="onRenameSession"
+          @pin="onPinSession"
+          @move="onMoveSession"
+          @delete="onDeleteSession"
+          @clear-all="onClearAllRequest"
+          @create-project="onCreateProject"
+          @rename-project="onRenameProject"
+          @delete-project="onDeleteProject"
+        />
 
-        <div class="kb-composer">
-          <textarea
-            v-model="question"
-            class="kb-input"
-            rows="3"
-            placeholder="基于你的笔记提问…（Enter 发送，Shift+Enter 换行）"
-            :disabled="asking"
-            @keydown="onAskKeydown"
-          />
-          <button
-            class="pill-btn kb-send"
-            type="button"
-            :disabled="asking || !question.trim() || modelOptions.length === 0"
-            @click="submitAsk"
-          >
-            <Send :size="14" :stroke-width="2" aria-hidden="true" />
-            {{ asking ? '生成中…' : '提问' }}
-          </button>
-        </div>
-
-        <div v-if="askedOnce" class="kb-answer card">
-          <div v-if="asking && !streamText" class="kb-answer-pending">正在检索并生成…</div>
-          <template v-else>
-            <p v-if="clarifyBanner" class="kb-clarify" role="status">{{ clarifyBanner }}</p>
+        <div class="kb-chat">
+          <div ref="messagesEl" class="kb-messages">
+            <div v-if="!messages.length" class="kb-empty">基于你的笔记提问</div>
             <div
-              v-if="streamHtml"
-              class="kb-md md-body"
-              @click="onAnswerClick"
-              v-html="streamHtml"
-            />
-            <div v-else-if="!answerError" class="kb-answer-pending">暂无内容</div>
-          </template>
-
-          <p v-if="answerError" class="kb-answer-err">
-            {{ answerError }}
-            <button class="kb-link" type="button" @click="openEmbedSettings">检查嵌入设置</button>
-          </p>
-
-          <p v-if="noHit && !asking" class="kb-nohit">
-            知识库中未找到直接相关内容，以下为模型通用回答。
-          </p>
-
-          <div v-if="citations.length" ref="citationsRootRef" class="kb-citations">
-            <h3 class="kb-cite-heading">来源</h3>
-            <div v-for="g in citeGroups" :key="g.note_id" class="kb-cite-group">
-              <button
-                type="button"
-                class="kb-cite-group-head"
-                @click="emit('open-note', g.note_id)"
-              >
-                <span class="kb-cite-title">{{ g.note_title || '无标题笔记' }}</span>
-                <span class="kb-cite-path">
-                  <template v-if="g.folder_path">{{ g.folder_path }}</template>
-                  <template v-if="g.folder_path"> · </template>
-                  {{ g.items.length }} 个片段
-                </span>
-              </button>
-              <div
-                v-for="c in g.items"
-                :key="c.index"
-                class="kb-cite"
-                :data-cite-index="c.index"
-                :data-flash="flashCite === c.index ? '1' : undefined"
-              >
-                <div class="kb-cite-row">
-                  <button
-                    type="button"
-                    class="kb-cite-open"
-                    :title="'打开笔记'"
-                    @click="emit('open-note', c.note_id)"
-                  >
-                    <span class="kb-cite-idx">[{{ c.index }}]</span>
-                    <span v-if="c.heading" class="kb-cite-heading-text">{{ c.heading }}</span>
-                  </button>
-                  <button
-                    v-if="c.snippet"
-                    type="button"
-                    class="kb-cite-chevron"
-                    :title="expandedSnips.has(c.index) ? '收起摘要' : '展开摘要'"
-                    :aria-expanded="expandedSnips.has(c.index)"
-                    @click="toggleSnip(c.index)"
-                  >
-                    {{ expandedSnips.has(c.index) ? '▾' : '▸' }}
-                  </button>
-                </div>
-                <p v-if="expandedSnips.has(c.index) && c.snippet" class="kb-cite-snip">{{ c.snippet }}</p>
+              v-for="m in messages"
+              :key="m.id"
+              class="kb-msg"
+              :data-role="m.role"
+              :data-msg-id="String(m.id)"
+            >
+              <div v-if="m.role === 'user'" class="kb-bubble kb-bubble-user">
+                {{ m.content }}
               </div>
+              <div v-else class="kb-bubble kb-bubble-assistant">
+                <div v-if="m.streaming && !m.content && !m.error" class="kb-answer-pending">
+                  正在检索并生成…
+                </div>
+                <template v-else>
+                  <p v-if="m.banner" class="kb-clarify" role="status">{{ m.banner }}</p>
+                  <div
+                    v-if="m.html"
+                    class="kb-md md-body"
+                    @click="onAnswerClick"
+                    v-html="m.html"
+                  />
+                  <div v-else-if="!m.error" class="kb-answer-pending">暂无内容</div>
+                </template>
+
+                <p v-if="m.error" class="kb-answer-err">
+                  {{ m.error }}
+                  <button class="kb-link" type="button" @click="openEmbedSettings">检查嵌入设置</button>
+                </p>
+
+                <p v-if="!m.streaming && m.citations.length === 0 && m.content && !m.error" class="kb-nohit">
+                  知识库中未找到直接相关内容，以下为模型通用回答。
+                </p>
+
+                <div v-if="m.citations.length" class="kb-citations">
+                  <h3 class="kb-cite-heading">来源</h3>
+                  <div
+                    v-for="g in citeGroupsFor(m.citations)"
+                    :key="g.note_id"
+                    class="kb-cite-group"
+                  >
+                    <button
+                      type="button"
+                      class="kb-cite-group-head"
+                      @click="emit('open-note', g.note_id)"
+                    >
+                      <span class="kb-cite-title">{{ g.note_title || '无标题笔记' }}</span>
+                      <span class="kb-cite-path">
+                        <template v-if="g.folder_path">{{ g.folder_path }}</template>
+                        <template v-if="g.folder_path"> · </template>
+                        {{ g.items.length }} 个片段
+                      </span>
+                    </button>
+                    <div
+                      v-for="c in g.items"
+                      :key="c.index"
+                      class="kb-cite"
+                      :data-cite-index="c.index"
+                      :data-flash="flashCite === snipKey(m.id, c.index) ? '1' : undefined"
+                    >
+                      <div class="kb-cite-row">
+                        <button
+                          type="button"
+                          class="kb-cite-open"
+                          title="打开笔记"
+                          @click="emit('open-note', c.note_id)"
+                        >
+                          <span class="kb-cite-idx">[{{ c.index }}]</span>
+                          <span v-if="c.heading" class="kb-cite-heading-text">{{ c.heading }}</span>
+                        </button>
+                        <button
+                          v-if="c.snippet"
+                          type="button"
+                          class="kb-cite-chevron"
+                          :title="expandedSnips.has(snipKey(m.id, c.index)) ? '收起摘要' : '展开摘要'"
+                          :aria-expanded="expandedSnips.has(snipKey(m.id, c.index))"
+                          @click="toggleSnip(m.id, c.index)"
+                        >
+                          {{ expandedSnips.has(snipKey(m.id, c.index)) ? '▾' : '▸' }}
+                        </button>
+                      </div>
+                      <p
+                        v-if="expandedSnips.has(snipKey(m.id, c.index)) && c.snippet"
+                        class="kb-cite-snip"
+                      >
+                        {{ c.snippet }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="kb-composer-dock">
+            <div class="kb-ask-toolbar">
+              <AppSelect
+                v-model="selectedModel"
+                class="kb-model-select"
+                :options="modelOptions"
+                :disabled="asking || modelOptions.length === 0"
+                aria-label="对话模型"
+                compact
+              />
+              <AppSelect
+                v-model="topKValue"
+                class="kb-topk-select"
+                :options="topKOptions"
+                :disabled="asking"
+                aria-label="检索条数"
+                compact
+              />
+            </div>
+
+            <div class="kb-composer">
+              <textarea
+                v-model="question"
+                class="kb-input"
+                rows="3"
+                placeholder="基于你的笔记提问…（Enter 发送，Shift+Enter 换行）"
+                :disabled="asking"
+                @keydown="onAskKeydown"
+              />
+              <button
+                class="pill-btn kb-send"
+                type="button"
+                :disabled="asking || !question.trim() || modelOptions.length === 0"
+                @click="submitAsk"
+              >
+                <Send :size="14" :stroke-width="2" aria-hidden="true" />
+                {{ asking ? '生成中…' : '提问' }}
+              </button>
             </div>
           </div>
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      :visible="clearOpen"
+      title="清空全部会话？"
+      message="将删除所有知识库对话记录，项目文件夹会保留为空。"
+      confirm-text="清空"
+      tone="danger"
+      @confirm="onClearConfirm"
+      @cancel="clearOpen = false"
+    />
 
     <!-- 嵌入设置弹窗 -->
     <Teleport to="body">
@@ -797,14 +1177,79 @@ watch(embedOpen, (open) => {
   color: var(--brand-600);
 }
 
-.kb-ask {
+.kb-body {
   flex: 1;
   min-height: 0;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+}
+
+.kb-chat {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px 18px 18px;
+  min-height: 0;
+  min-width: 0;
+  border-left: 1px solid var(--border-soft);
+}
+
+.kb-messages {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kb-empty {
+  margin: auto;
+  font-size: 0.875rem;
+  color: var(--text-3);
+  text-align: center;
+}
+
+.kb-msg {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+}
+.kb-msg[data-role='user'] {
+  align-items: flex-end;
+}
+.kb-msg[data-role='assistant'] {
+  align-items: stretch;
+}
+
+.kb-bubble-user {
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--brand-500) 16%, var(--bg-card-soft));
+  color: var(--text-1);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.kb-bubble-assistant {
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-card-soft);
+  border: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kb-composer-dock {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border-soft);
 }
 
 .kb-ask-toolbar {
@@ -860,13 +1305,6 @@ watch(embedOpen, (open) => {
   align-self: flex-end;
 }
 
-.kb-answer {
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
 .kb-answer-pending {
   font-size: 0.8125rem;
   color: var(--text-3);
@@ -893,7 +1331,7 @@ watch(embedOpen, (open) => {
 }
 
 .kb-clarify {
-  margin: 0 0 10px;
+  margin: 0;
   padding: 8px 12px;
   border-radius: 8px;
   font-size: 12px;

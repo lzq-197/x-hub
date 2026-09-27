@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, inject, nextTick, ref } from 'vue'
 import { Folder, FolderPlus, MessageSquarePlus, Pin, Plus } from 'lucide-vue-next'
 import type { KbProject, KbSession } from '../api/tauri'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
@@ -23,6 +23,8 @@ const emit = defineEmits<{
   'rename-project': [id: number, name: string]
   'delete-project': [id: number]
 }>()
+
+const showToast = inject<(msg: string) => void>('showToast', () => {})
 
 function byUpdatedDesc(a: KbSession, b: KbSession) {
   return b.updated_at.localeCompare(a.updated_at)
@@ -61,13 +63,19 @@ function toggleProject(id: number) {
 }
 
 function onSelect(id: number) {
-  if (props.disabled) return
+  if (props.disabled) {
+    showToast('生成中，请稍候')
+    return
+  }
   if (id === props.activeId) return
   emit('select', id)
 }
 
 function onNew() {
-  if (props.disabled) return
+  if (props.disabled) {
+    showToast('生成中，请稍候')
+    return
+  }
   emit('new')
 }
 
@@ -81,8 +89,8 @@ const editing = ref<EditState | null>(null)
 const editText = ref('')
 const editInput = ref<HTMLInputElement | null>(null)
 
-function bindEditInput(el: Element | null) {
-  editInput.value = el as HTMLInputElement | null
+function bindEditInput(el: unknown) {
+  editInput.value = el instanceof HTMLInputElement ? el : null
 }
 
 async function focusEdit() {
