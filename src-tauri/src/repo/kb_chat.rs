@@ -40,8 +40,30 @@ pub fn rename_project(conn: &Connection, id: i64, name: &str) -> Result<KbProjec
 }
 
 pub fn delete_project(conn: &Connection, id: i64) -> Result<()> {
+    // 删前记下将被打回「最近」的孤儿（非置顶），稳定序；删后接到现有最近末尾再重密（§3.3）
+    let mut orphan_stmt = conn.prepare(
+        "SELECT id FROM kb_sessions
+         WHERE project_id = ?1 AND pinned = 0
+         ORDER BY sort_order ASC, id ASC",
+    )?;
+    let orphan_ids: Vec<i64> = orphan_stmt
+        .query_map(params![id], |r| r.get(0))?
+        .collect::<Result<Vec<_>>>()?;
+    let recent_max: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), 0) FROM kb_sessions
+         WHERE project_id IS NULL AND pinned = 0",
+        [],
+        |r| r.get(0),
+    )?;
+
     conn.execute("DELETE FROM kb_projects WHERE id = ?1", params![id])?;
-    // ON DELETE SET NULL 后，仅重密「最近」可见行（project_id IS NULL AND pinned = 0）
+    // ON DELETE SET NULL 后：孤儿接到最近末尾，再 densify，避免按旧 sort 与既有最近交错
+    for (i, sid) in orphan_ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE kb_sessions SET sort_order = ?1 WHERE id = ?2",
+            params![recent_max + (i as i64) + 1, sid],
+        )?;
+    }
     densify_recent_visible(conn)?;
     Ok(())
 }
@@ -717,22 +739,66 @@ mod tests {
     fn delete_project_densifies_recent() {
         let conn = init_in_memory().unwrap();
         let p = create_project(&conn, "P").unwrap();
-        let r = create_session(&conn, "r", "m", None).unwrap();
-        let s = create_session(&conn, "s", "m", Some(p.id)).unwrap();
+        let r1 = create_session(&conn, "r1", "m", None).unwrap();
+        let r2 = create_session(&conn, "r2", "m", None).unwrap();
+        let o1 = create_session(&conn, "o1", "m", Some(p.id)).unwrap();
+        let o2 = create_session(&conn, "o2", "m", Some(p.id)).unwrap();
         delete_project(&conn, p.id).unwrap();
-        let s2 = get_session(&conn, s.id).unwrap();
-        assert_eq!(s2.project_id, None);
-        // both in recent bucket with dense 1..n
+        assert_eq!(get_session(&conn, o1.id).unwrap().project_id, None);
+        assert_eq!(get_session(&conn, o2.id).unwrap().project_id, None);
+        // 孤儿接在既有最近之后，再密成 1..n（不得与 r1/r2 按旧 sort 交错）
         let mut recent: Vec<_> = list_sessions(&conn)
             .unwrap()
             .into_iter()
             .filter(|x| !x.pinned && x.project_id.is_none())
             .collect();
         recent.sort_by_key(|x| x.sort_order);
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].sort_order, 1);
-        assert_eq!(recent[1].sort_order, 2);
-        let _ = r;
+        assert_eq!(recent.len(), 4);
+        assert_eq!(
+            recent.iter().map(|x| x.id).collect::<Vec<_>>(),
+            vec![r1.id, r2.id, o1.id, o2.id]
+        );
+        assert_eq!(
+            recent.iter().map(|x| x.sort_order).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn place_from_project_keeps_pin_on_project_move() {
+        let conn = init_in_memory().unwrap();
+        let p1 = create_project(&conn, "P1").unwrap();
+        let p2 = create_project(&conn, "P2").unwrap();
+        let s = create_session(&conn, "t", "m", Some(p1.id)).unwrap();
+        set_pinned(&conn, s.id, true).unwrap();
+        // 同源项目内重排：sourceZone=Project 且仍在该项目 → 保持 pinned
+        let same = place_session(
+            &conn,
+            s.id,
+            KbDragSourceZone::Project,
+            &KbPlaceTarget {
+                zone: KbSessionZone::Project,
+                project_id: Some(p1.id),
+                before_id: None,
+            },
+        )
+        .unwrap();
+        assert!(same.pinned);
+        assert_eq!(same.project_id, Some(p1.id));
+        // 拖到另一项目：sourceZone=Project → 保持 pinned，只换 project_id
+        let other = place_session(
+            &conn,
+            s.id,
+            KbDragSourceZone::Project,
+            &KbPlaceTarget {
+                zone: KbSessionZone::Project,
+                project_id: Some(p2.id),
+                before_id: None,
+            },
+        )
+        .unwrap();
+        assert!(other.pinned);
+        assert_eq!(other.project_id, Some(p2.id));
     }
 
     #[test]

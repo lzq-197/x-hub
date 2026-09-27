@@ -8,6 +8,7 @@ import type {
   KbSession,
 } from '../api/tauri'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
+import { sameIdOrder } from '../utils/noteTreeHit'
 
 const props = defineProps<{
   sessions: readonly KbSession[]
@@ -194,6 +195,9 @@ function showProjectEdit(id: number) {
 type DragState = {
   id: number
   sourceZone: KbDragSourceZone
+  /** 源在项目区时的 project_id；置顶/最近为 null */
+  sourceProjectId: number | null
+  sourceEl: HTMLElement
   startY: number
   startX: number
   active: boolean
@@ -286,14 +290,39 @@ function isHotContainer(key: string) {
   return hot.value?.kind === 'container' && hot.value.key === key
 }
 
-function resolveHit(clientX: number, clientY: number): HotState | null {
-  const body = sideBodyRef.value
-  if (!body) return null
-  const raw = document.elementFromPoint(clientX, clientY)
-  if (!raw || !body.contains(raw)) return null
-  const drop = (raw as HTMLElement).closest?.('[data-kb-drop]') as HTMLElement | null
-  if (!drop || !body.contains(drop)) return null
+/** 指针仍在源行矩形内 → 取消落点（微拖不误 append） */
+function pointerInSourceRow(clientX: number, clientY: number): boolean {
+  const live = drag.value
+  if (!live?.sourceEl) return false
+  const r = live.sourceEl.getBoundingClientRect()
+  return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom
+}
 
+/**
+ * 从 elementsFromPoint 栈里找第一个可用 data-kb-drop：
+ * 跳过 .is-dragging / 源会话行（pointer-events:none 时栈会穿透到区头 section）。
+ */
+function findDropEl(clientX: number, clientY: number, body: HTMLElement): HTMLElement | null {
+  const live = drag.value
+  const stack = document.elementsFromPoint(clientX, clientY)
+  for (const node of stack) {
+    if (!(node instanceof Element) || !body.contains(node)) continue
+    if (node.closest('.is-dragging')) continue
+    const drop = node.closest('[data-kb-drop]') as HTMLElement | null
+    if (!drop || !body.contains(drop)) continue
+    if (
+      drop.dataset.kbDrop === 'session' &&
+      live &&
+      Number(drop.dataset.sessionId) === live.id
+    ) {
+      continue
+    }
+    return drop
+  }
+  return null
+}
+
+function hitFromDropEl(drop: HTMLElement, clientY: number): HotState | null {
   const kind = drop.dataset.kbDrop
   if (kind === 'pinned-head') {
     return {
@@ -367,6 +396,39 @@ function resolveHit(clientX: number, clientY: number): HotState | null {
   return null
 }
 
+function resolveHit(clientX: number, clientY: number): HotState | null {
+  const body = sideBodyRef.value
+  if (!body) return null
+  if (pointerInSourceRow(clientX, clientY)) return null
+  const drop = findDropEl(clientX, clientY, body)
+  if (!drop) return null
+  return hitFromDropEl(drop, clientY)
+}
+
+/** 落点与当前区归属 + 顺序一致 → 不调 API（对齐 NoteFolderTree sameIdOrder） */
+function isPlaceNoop(live: DragState, place: KbPlaceTarget): boolean {
+  if (place.zone === 'pinned') {
+    if (live.sourceZone !== 'pinned') return false
+  } else if (place.zone === 'recent') {
+    if (live.sourceZone !== 'recent') return false
+  } else {
+    if (live.sourceZone !== 'project') return false
+    if (live.sourceProjectId !== place.projectId) return false
+  }
+
+  const zone: KbDragSourceZone = place.zone
+  const projectId = place.zone === 'project' ? (place.projectId ?? null) : null
+  const ids = sessionsInZone(zone, projectId).map((s) => s.id)
+  const without = ids.filter((id) => id !== live.id)
+  let insertAt = without.length
+  if (place.beforeId != null) {
+    const bi = without.indexOf(place.beforeId)
+    if (bi >= 0) insertAt = bi
+  }
+  const next = [...without.slice(0, insertAt), live.id, ...without.slice(insertAt)]
+  return sameIdOrder(ids, next)
+}
+
 function updateDragAim(clientX: number, clientY: number) {
   const live = drag.value
   const body = sideBodyRef.value
@@ -395,15 +457,21 @@ function updateDragAim(clientX: number, clientY: number) {
   }
 }
 
-function finishDrag() {
+function finishDrag(clientX?: number, clientY?: number) {
   const live = drag.value
   const aim = hot.value
   suppressSelect = true
   setTimeout(() => {
     suppressSelect = false
   }, 0)
+  const inSource =
+    live != null &&
+    clientX != null &&
+    clientY != null &&
+    pointerInSourceRow(clientX, clientY)
   clearDragChrome()
-  if (!live || !aim) return
+  if (!live || !aim || inSource) return
+  if (isPlaceNoop(live, aim.place)) return
   emit('place', live.id, live.sourceZone, aim.place)
 }
 
@@ -421,6 +489,8 @@ function onSessionPointerDown(s: KbSession, zone: KbDragSourceZone, e: PointerEv
   drag.value = {
     id: s.id,
     sourceZone: zone,
+    sourceProjectId: zone === 'project' ? s.project_id : null,
+    sourceEl: el,
     startX,
     startY,
     active: false,
@@ -459,7 +529,7 @@ function onSessionPointerDown(s: KbSession, zone: KbDragSourceZone, e: PointerEv
     updateDragAim(ev.clientX, ev.clientY)
   }
 
-  function onUp() {
+  function onUp(ev?: PointerEvent) {
     el.removeEventListener('pointermove', onMove)
     el.removeEventListener('pointerup', onUp)
     el.removeEventListener('pointercancel', onUp)
@@ -470,7 +540,7 @@ function onSessionPointerDown(s: KbSession, zone: KbDragSourceZone, e: PointerEv
       return
     }
     active = false
-    finishDrag()
+    finishDrag(ev?.clientX, ev?.clientY)
   }
 }
 
