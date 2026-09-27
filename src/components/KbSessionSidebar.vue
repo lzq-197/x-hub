@@ -26,25 +26,31 @@ const emit = defineEmits<{
 
 const showToast = inject<(msg: string) => void>('showToast', () => {})
 
-function byUpdatedDesc(a: KbSession, b: KbSession) {
+function bySortAsc(a: KbSession, b: KbSession) {
+  if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order
+  return b.updated_at.localeCompare(a.updated_at)
+}
+
+function byPinSortAsc(a: KbSession, b: KbSession) {
+  if (a.pin_sort_order !== b.pin_sort_order) return a.pin_sort_order - b.pin_sort_order
   return b.updated_at.localeCompare(a.updated_at)
 }
 
 const pinned = computed(() =>
-  props.sessions.filter((s) => s.pinned).slice().sort(byUpdatedDesc),
+  props.sessions.filter((s) => s.pinned).slice().sort(byPinSortAsc),
 )
 
 const recent = computed(() =>
   props.sessions
     .filter((s) => !s.pinned && s.project_id == null)
     .slice()
-    .sort(byUpdatedDesc),
+    .sort(bySortAsc),
 )
 
 const projectBlocks = computed(() =>
   props.projects.map((p) => ({
     project: p,
-    sessions: props.sessions.filter((s) => s.project_id === p.id).slice().sort(byUpdatedDesc),
+    sessions: props.sessions.filter((s) => s.project_id === p.id).slice().sort(bySortAsc),
   })),
 )
 
@@ -256,8 +262,8 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
     </div>
 
     <div class="kb-side-body">
-      <!-- 置顶 -->
-      <section v-if="pinned.length" class="kb-sec">
+      <!-- 置顶（区头常驻，供拖放命中；空列表时 body 为空） -->
+      <section class="kb-sec">
         <div class="kb-sec-head">
           <Pin :size="11" :stroke-width="2" aria-hidden="true" />
           <span>置顶</span>
@@ -406,7 +412,13 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
                 </button>
               </template>
             </div>
-            <p v-if="block.sessions.length === 0" class="kb-empty-hint">暂无会话</p>
+            <div
+              v-if="block.sessions.length === 0 && isExpanded(block.project.id)"
+              class="kb-drop-strip"
+              data-kb-drop="project-empty"
+              :data-project-id="block.project.id"
+              aria-hidden="true"
+            />
           </template>
         </div>
 
@@ -745,6 +757,16 @@ function onMoreClick(e: MouseEvent, s: KbSession) {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+.kb-drop-strip {
+  height: 10px;
+  margin: 2px 8px 6px;
+  border-radius: 6px;
+  border: 1px dashed transparent;
+}
+.kb-drop-strip.is-hot {
+  border-color: color-mix(in srgb, var(--brand-500) 55%, transparent);
+  background: color-mix(in srgb, var(--brand-500) 12%, transparent);
 }
 .kb-link {
   display: inline-flex;
