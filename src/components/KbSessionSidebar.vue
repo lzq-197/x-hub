@@ -219,6 +219,8 @@ const lineTop = ref<number | null>(null)
 let hoverExpandTimer: ReturnType<typeof setTimeout> | null = null
 let hoverExpandTarget: number | null = null
 let dragCancelBound = false
+/** Esc/失焦取消后，阻止同一次指针手势在 pointerup 时仍 finishDrag */
+let pointerGestureDead = false
 
 function clearHoverExpand() {
   if (hoverExpandTimer != null) {
@@ -258,6 +260,7 @@ function clearDragChrome() {
 
 function cancelDrag() {
   if (!drag.value) return
+  pointerGestureDead = true
   clearDragChrome()
 }
 
@@ -459,18 +462,17 @@ function updateDragAim(clientX: number, clientY: number) {
 
 function finishDrag(clientX?: number, clientY?: number) {
   const live = drag.value
-  const aim = hot.value
   suppressSelect = true
   setTimeout(() => {
     suppressSelect = false
   }, 0)
-  const inSource =
-    live != null &&
-    clientX != null &&
-    clientY != null &&
-    pointerInSourceRow(clientX, clientY)
+  // 以松手坐标重算落点，避免沿用最后一次 move 的陈旧 hot
+  const aim =
+    live != null && clientX != null && clientY != null
+      ? resolveHit(clientX, clientY)
+      : null
   clearDragChrome()
-  if (!live || !aim || inSource) return
+  if (!live || !aim) return
   if (isPlaceNoop(live, aim.place)) return
   emit('place', live.id, live.sourceZone, aim.place)
 }
@@ -485,6 +487,7 @@ function onSessionPointerDown(s: KbSession, zone: KbDragSourceZone, e: PointerEv
   const startY = e.clientY
   let active = false
   let dead = false
+  pointerGestureDead = false
 
   drag.value = {
     id: s.id,
@@ -508,7 +511,7 @@ function onSessionPointerDown(s: KbSession, zone: KbDragSourceZone, e: PointerEv
     } catch {
       /* ignore */
     }
-    if (!drag.value) return false
+    if (!drag.value || pointerGestureDead) return false
     drag.value.active = true
     document.body.classList.add('kb-session-dragging')
     document.getSelection()?.removeAllRanges()
@@ -517,7 +520,7 @@ function onSessionPointerDown(s: KbSession, zone: KbDragSourceZone, e: PointerEv
   }
 
   function onMove(ev: PointerEvent) {
-    if (dead) return
+    if (dead || pointerGestureDead) return
     if (!active) {
       if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return
       if (!begin()) {
@@ -535,12 +538,15 @@ function onSessionPointerDown(s: KbSession, zone: KbDragSourceZone, e: PointerEv
     el.removeEventListener('pointercancel', onUp)
     window.removeEventListener('pointerup', onUp)
     window.removeEventListener('pointercancel', onUp)
-    if (!active) {
+    const aborted = dead || pointerGestureDead
+    if (!active || aborted) {
       drag.value = null
+      pointerGestureDead = false
       return
     }
     active = false
     finishDrag(ev?.clientX, ev?.clientY)
+    pointerGestureDead = false
   }
 }
 

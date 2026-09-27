@@ -175,17 +175,18 @@ pub fn reorder_sessions(
     if ids.is_empty() {
         return Ok(());
     }
+    let tx = conn.unchecked_transaction()?;
     match zone {
         KbSessionZone::Pinned => {
             for &id in ids {
-                if !get_session(conn, id)?.pinned {
+                if !get_session(&tx, id)?.pinned {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "INVALID_ARGUMENT: 重排序列含非置顶会话".into(),
                     ));
                 }
             }
             for (i, &id) in ids.iter().enumerate() {
-                conn.execute(
+                tx.execute(
                     "UPDATE kb_sessions SET pin_sort_order = ?1 WHERE id = ?2",
                     params![(i as i64) + 1, id],
                 )?;
@@ -193,7 +194,7 @@ pub fn reorder_sessions(
         }
         KbSessionZone::Recent => {
             for &id in ids {
-                let s = get_session(conn, id)?;
+                let s = get_session(&tx, id)?;
                 if s.pinned || s.project_id.is_some() {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "INVALID_ARGUMENT: 重排序列含非最近区会话".into(),
@@ -201,7 +202,7 @@ pub fn reorder_sessions(
                 }
             }
             for (i, &id) in ids.iter().enumerate() {
-                conn.execute(
+                tx.execute(
                     "UPDATE kb_sessions SET sort_order = ?1 WHERE id = ?2",
                     params![(i as i64) + 1, id],
                 )?;
@@ -214,20 +215,21 @@ pub fn reorder_sessions(
                 )
             })?;
             for &id in ids {
-                if get_session(conn, id)?.project_id != Some(pid) {
+                if get_session(&tx, id)?.project_id != Some(pid) {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "INVALID_ARGUMENT: 重排序列含非该项目会话".into(),
                     ));
                 }
             }
             for (i, &id) in ids.iter().enumerate() {
-                conn.execute(
+                tx.execute(
                     "UPDATE kb_sessions SET sort_order = ?1 WHERE id = ?2",
                     params![(i as i64) + 1, id],
                 )?;
             }
         }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -275,6 +277,10 @@ pub fn place_session(
                 "UPDATE kb_sessions SET pin_sort_order = ?1 WHERE id = ?2",
                 params![(i as i64) + 1, sid],
             )?;
+        }
+        // 从「最近」升置顶后，该行仍占 NULL 桶旧 sort 空洞 → 重密最近可见集
+        if !old_pinned && old_project_id.is_none() {
+            densify_recent_visible(&tx)?;
         }
     } else {
         for (i, &sid) in ids.iter().enumerate() {
@@ -365,8 +371,10 @@ fn next_membership_sort(conn: &Connection, project_id: Option<i64>) -> Result<i6
             params![pid],
             |r| r.get(0),
         )?,
+        // NULL 桶的「最近」可见集不含置顶行，max 口径与 densify_recent_visible 对齐
         None => conn.query_row(
-            "SELECT MAX(sort_order) FROM kb_sessions WHERE project_id IS NULL",
+            "SELECT MAX(sort_order) FROM kb_sessions
+             WHERE project_id IS NULL AND pinned = 0",
             [],
             |r| r.get(0),
         )?,
@@ -383,32 +391,27 @@ fn next_pin_sort(conn: &Connection) -> Result<i64> {
     Ok(max.unwrap_or(0) + 1)
 }
 
-/// 重写归属桶 `sort_order` 为 1..n（`project_id` 相同；NULL 桶 = `project_id IS NULL`）。
+/// 重写归属桶 `sort_order` 为 1..n。
+/// `project_id = Some`：该项目全部会话；`None`：仅最近可见（`pinned=0 AND project_id IS NULL`）。
 fn densify_membership(conn: &Connection, project_id: Option<i64>) -> Result<()> {
-    let sql = match project_id {
-        Some(_) => {
-            "SELECT id FROM kb_sessions WHERE project_id = ?1 ORDER BY sort_order ASC, id ASC"
+    match project_id {
+        Some(pid) => {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM kb_sessions WHERE project_id = ?1 ORDER BY sort_order ASC, id ASC",
+            )?;
+            let ids: Vec<i64> = stmt
+                .query_map(params![pid], |r| r.get(0))?
+                .collect::<Result<Vec<_>>>()?;
+            for (i, id) in ids.iter().enumerate() {
+                conn.execute(
+                    "UPDATE kb_sessions SET sort_order = ?1 WHERE id = ?2",
+                    params![(i as i64) + 1, id],
+                )?;
+            }
+            Ok(())
         }
-        None => {
-            "SELECT id FROM kb_sessions WHERE project_id IS NULL ORDER BY sort_order ASC, id ASC"
-        }
-    };
-    let mut stmt = conn.prepare(sql)?;
-    let ids: Vec<i64> = match project_id {
-        Some(pid) => stmt
-            .query_map(params![pid], |r| r.get(0))?
-            .collect::<Result<Vec<_>>>()?,
-        None => stmt
-            .query_map([], |r| r.get(0))?
-            .collect::<Result<Vec<_>>>()?,
-    };
-    for (i, id) in ids.iter().enumerate() {
-        conn.execute(
-            "UPDATE kb_sessions SET sort_order = ?1 WHERE id = ?2",
-            params![(i as i64) + 1, id],
-        )?;
+        None => densify_recent_visible(conn),
     }
-    Ok(())
 }
 
 /// 重写置顶区 `pin_sort_order` 为 1..n。
@@ -686,6 +689,34 @@ mod tests {
         assert!(out.pinned);
         assert_eq!(out.project_id, Some(p.id));
         assert_eq!(out.pin_sort_order, 1);
+    }
+
+    #[test]
+    fn place_recent_to_pinned_densifies_recent_bucket() {
+        let conn = init_in_memory().unwrap();
+        let a = create_session(&conn, "a", "m", None).unwrap();
+        let b = create_session(&conn, "b", "m", None).unwrap();
+        let c = create_session(&conn, "c", "m", None).unwrap();
+        assert_eq!(a.sort_order, 1);
+        assert_eq!(b.sort_order, 2);
+        assert_eq!(c.sort_order, 3);
+        place_session(
+            &conn,
+            a.id,
+            KbDragSourceZone::Recent,
+            &KbPlaceTarget {
+                zone: KbSessionZone::Pinned,
+                project_id: None,
+                before_id: None,
+            },
+        )
+        .unwrap();
+        assert!(get_session(&conn, a.id).unwrap().pinned);
+        // a 离开最近后，b/c 须密成 1..2，不能留下空洞
+        assert_eq!(get_session(&conn, b.id).unwrap().sort_order, 1);
+        assert_eq!(get_session(&conn, c.id).unwrap().sort_order, 2);
+        let d = create_session(&conn, "d", "m", None).unwrap();
+        assert_eq!(d.sort_order, 3);
     }
 
     #[test]
