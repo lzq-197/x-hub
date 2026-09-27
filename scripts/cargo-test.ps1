@@ -8,7 +8,8 @@
 param(
   [string[]]$TestArgs = @()
 )
-$ErrorActionPreference = 'Stop'
+# Continue: cargo 把编译进度打到 stderr；Stop 会把 NativeCommandError 当成终止异常
+$ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 $manifest = Join-Path $root 'src-tauri\windows\app.manifest'
 $cargoToml = Join-Path $root 'src-tauri\Cargo.toml'
