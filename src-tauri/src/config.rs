@@ -246,6 +246,9 @@ pub struct AppConfig {
     /// 知识库检索 Top-K（3–10，只经 `save_kb_embed_config` 写盘）
     #[serde(default = "default_kb_top_k")]
     pub kb_top_k: i64,
+    /// 知识库当前打开的会话 id（只经 `set_kb_active_session` 写盘）
+    #[serde(default)]
+    pub kb_active_session_id: Option<i64>,
 }
 
 fn one() -> f64 {
@@ -427,6 +430,7 @@ impl Default for AppConfig {
             kb_embed_base_url: default_kb_embed_base(),
             kb_embed_model: default_kb_embed_model(),
             kb_top_k: default_kb_top_k(),
+            kb_active_session_id: None,
         }
     }
 }
@@ -571,6 +575,7 @@ const BACKEND_MANAGED_FIELDS: &[&str] = &[
     "kb_embed_base_url",
     "kb_embed_model",
     "kb_top_k",
+    "kb_active_session_id",
     // 已废弃的两个端点字段（v0.6.1）：真相源是内置常量，只由 migrate_legacy_endpoints 归一
     "market_endpoint",
     "update_endpoint",
@@ -607,6 +612,7 @@ pub fn merge_disk_authoritative(merged: &mut AppConfig, disk: &AppConfig) {
     merged.kb_embed_base_url = disk.kb_embed_base_url.clone();
     merged.kb_embed_model = disk.kb_embed_model.clone();
     merged.kb_top_k = disk.kb_top_k;
+    merged.kb_active_session_id = disk.kb_active_session_id;
 }
 
 pub fn save(config: &AppConfig) -> Result<(), String> {
@@ -810,6 +816,7 @@ mod tests {
             kb_embed_base_url: "http://127.0.0.1:9999/v1".to_string(),
             kb_embed_model: "disk-embed-model".to_string(),
             kb_top_k: 9,
+            kb_active_session_id: Some(42),
             ..AppConfig::default()
         }
     }
@@ -880,6 +887,7 @@ mod tests {
         assert_eq!(merged.kb_embed_base_url, disk.kb_embed_base_url);
         assert_eq!(merged.kb_embed_model, disk.kb_embed_model);
         assert_eq!(merged.kb_top_k, disk.kb_top_k);
+        assert_eq!(merged.kb_active_session_id, disk.kb_active_session_id);
     }
 
     /// 清单漏登就是这条红：任何登记在案的名字都必须是 `AppConfig` 真实存在的字段，

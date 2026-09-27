@@ -224,7 +224,8 @@ export interface WindowState {
  * 后端管理字段清单（须与 `config.rs::BACKEND_MANAGED_FIELDS` 对齐）：`chat_models`、
  * `chat_window_*`、`floating_ball_*`、`dev_extensions`/`dev_mode_enabled`、`skill_roots`、
  * `skipped_update_version`、`kb_embed_base_url`/`kb_embed_model`/`kb_top_k`（经
- * `save_kb_embed_config`）、已废弃 `market_endpoint`/`update_endpoint`。
+ * `save_kb_embed_config`）、`kb_active_session_id`（经 `set_kb_active_session`）、
+ * 已废弃 `market_endpoint`/`update_endpoint`。
  */
 export interface AppConfig {
   theme_mode: string // 'light' | 'dark' | 'system'
@@ -332,6 +333,8 @@ export interface AppConfig {
   kb_embed_base_url?: string
   kb_embed_model?: string
   kb_top_k?: number
+  /** 后端管理：当前知识库会话 id（经 set_kb_active_session） */
+  kb_active_session_id?: number | null
 }
 
 export interface AppInfo {
