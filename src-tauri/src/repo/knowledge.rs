@@ -6,15 +6,24 @@ const TARGET_CHUNK_LEN: usize = 500;
 const MAX_CHUNK_LEN: usize = 1000;
 const MAX_HEADING_LEVELS: usize = 4;
 
+#[derive(Debug)]
 pub struct ChunkText {
     pub heading: String,
     pub content: String,
+    /// UTF-8 byte offset into source md; -1 = unknown
+    #[allow(dead_code)] // read by later citation/persist tasks + unit tests
+    pub md_start: i64,
+    #[allow(dead_code)]
+    pub md_end: i64,
 }
 
 struct RawSegment {
     heading: String,
     text: String,
     is_code: bool,
+    /// byte offsets into the full markdown document (half-open; includes line newlines)
+    md_start: usize,
+    md_end: usize,
 }
 
 pub fn chunk_markdown(md: &str) -> Vec<ChunkText> {
@@ -22,36 +31,54 @@ pub fn chunk_markdown(md: &str) -> Vec<ChunkText> {
         return Vec::new();
     }
 
+    let md_len = md.len();
     let segments = parse_segments(md);
     let mut chunks = Vec::new();
     let mut buf = String::new();
     let mut buf_heading = String::new();
     let mut buf_is_code = false;
+    let mut buf_md_start: i64 = -1;
+    let mut buf_md_end: i64 = -1;
 
     for seg in segments {
-        let seg_text = if seg.is_code {
-            seg.text.clone()
+        let (seg_text, origins) = if seg.is_code {
+            let origins: Vec<usize> = seg.text.char_indices().map(|(i, _)| i).collect();
+            (seg.text.clone(), origins)
         } else {
-            strip_markdown(&seg.text)
+            strip_markdown_aligned(&seg.text)
         };
         if seg_text.trim().is_empty() {
             continue;
         }
 
         if seg.is_code {
-            flush_buffer(&mut buf, &mut buf_heading, buf_is_code, &mut chunks);
-            for piece in split_long_text(&seg_text, MAX_CHUNK_LEN) {
-                if !piece.trim().is_empty() {
-                    chunks.push(ChunkText {
-                        heading: seg.heading.clone(),
-                        content: piece,
-                    });
+            flush_buffer(
+                &mut buf,
+                &mut buf_heading,
+                buf_is_code,
+                &mut chunks,
+                &mut buf_md_start,
+                &mut buf_md_end,
+                md_len,
+            );
+            for (piece, start_char, end_char) in split_long_text_ranges(&seg_text, MAX_CHUNK_LEN) {
+                if piece.trim().is_empty() {
+                    continue;
                 }
+                let src_len = seg.md_end - seg.md_start;
+                let (rel_s, rel_e) = piece_offsets(&origins, start_char, end_char, src_len);
+                let (md_start, md_end) = map_seg_offsets(seg.md_start, md_len, rel_s, rel_e);
+                chunks.push(ChunkText {
+                    heading: seg.heading.clone(),
+                    content: piece,
+                    md_start,
+                    md_end,
+                });
             }
             continue;
         }
 
-        for piece in split_long_text(&seg_text, MAX_CHUNK_LEN) {
+        for (piece, start_char, end_char) in split_long_text_ranges(&seg_text, MAX_CHUNK_LEN) {
             if piece.trim().is_empty() {
                 continue;
             }
@@ -60,15 +87,37 @@ pub fn chunk_markdown(md: &str) -> Vec<ChunkText> {
             let same_heading = buf.is_empty() || buf_heading == seg.heading;
 
             if !buf.is_empty()
-                && (!same_heading || buf_len + 1 + piece_len > MAX_CHUNK_LEN
+                && (!same_heading
+                    || buf_len + 1 + piece_len > MAX_CHUNK_LEN
                     || buf_len >= TARGET_CHUNK_LEN)
             {
-                flush_buffer(&mut buf, &mut buf_heading, buf_is_code, &mut chunks);
+                flush_buffer(
+                    &mut buf,
+                    &mut buf_heading,
+                    buf_is_code,
+                    &mut chunks,
+                    &mut buf_md_start,
+                    &mut buf_md_end,
+                    md_len,
+                );
             }
+
+            let src_len = seg.md_end - seg.md_start;
+            let (rel_s, rel_e) = piece_offsets(&origins, start_char, end_char, src_len);
+            let (piece_start, piece_end) = map_seg_offsets(seg.md_start, md_len, rel_s, rel_e);
 
             if buf.is_empty() {
                 buf_heading = seg.heading.clone();
                 buf_is_code = false;
+                buf_md_start = piece_start;
+                buf_md_end = piece_end;
+            } else if piece_end > 0 {
+                if buf_md_start < 0 {
+                    buf_md_start = piece_start;
+                }
+                if piece_end > buf_md_end {
+                    buf_md_end = piece_end;
+                }
             }
 
             if !buf.is_empty() {
@@ -78,97 +127,182 @@ pub fn chunk_markdown(md: &str) -> Vec<ChunkText> {
         }
     }
 
-    flush_buffer(&mut buf, &mut buf_heading, buf_is_code, &mut chunks);
+    flush_buffer(
+        &mut buf,
+        &mut buf_heading,
+        buf_is_code,
+        &mut chunks,
+        &mut buf_md_start,
+        &mut buf_md_end,
+        md_len,
+    );
     chunks
 }
 
-fn flush_buffer(buf: &mut String, heading: &mut String, _is_code: bool, chunks: &mut Vec<ChunkText>) {
+fn clamp_offsets(md_len: usize, start: i64, end: i64) -> (i64, i64) {
+    if start >= 0 && end > start && (end as usize) <= md_len {
+        (start, end)
+    } else {
+        (-1, -1)
+    }
+}
+
+fn map_seg_offsets(seg_start: usize, md_len: usize, rel_s: i64, rel_e: i64) -> (i64, i64) {
+    if rel_s < 0 || rel_e < 0 {
+        return (-1, -1);
+    }
+    clamp_offsets(md_len, seg_start as i64 + rel_s, seg_start as i64 + rel_e)
+}
+
+fn piece_offsets(origins: &[usize], start_char: usize, end_char: usize, src_len: usize) -> (i64, i64) {
+    if start_char >= origins.len() || end_char == 0 || end_char > origins.len() {
+        return (-1, -1);
+    }
+    let start = origins[start_char] as i64;
+    // end = byte after last char: next origin, or src_len when piece runs to the end
+    let end = if end_char < origins.len() {
+        origins[end_char] as i64
+    } else {
+        src_len as i64
+    };
+    if start < end {
+        (start, end)
+    } else {
+        (-1, -1)
+    }
+}
+
+fn flush_buffer(
+    buf: &mut String,
+    heading: &mut String,
+    _is_code: bool,
+    chunks: &mut Vec<ChunkText>,
+    buf_md_start: &mut i64,
+    buf_md_end: &mut i64,
+    md_len: usize,
+) {
     let text = buf.trim();
     if text.is_empty() {
         buf.clear();
+        *buf_md_start = -1;
+        *buf_md_end = -1;
         return;
     }
+    let (md_start, md_end) = clamp_offsets(md_len, *buf_md_start, *buf_md_end);
     chunks.push(ChunkText {
         heading: std::mem::take(heading),
         content: text.to_string(),
+        md_start,
+        md_end,
     });
     buf.clear();
+    *buf_md_start = -1;
+    *buf_md_end = -1;
 }
 
 fn parse_segments(md: &str) -> Vec<RawSegment> {
     let mut headings: Vec<String> = Vec::new();
     let mut segments = Vec::new();
-    let mut para_lines: Vec<String> = Vec::new();
+    let mut para_start: Option<usize> = None;
+    let mut para_end: usize = 0;
     let mut in_code = false;
-    let mut code_lines: Vec<String> = Vec::new();
+    let mut code_start: usize = 0;
+    let mut code_end: usize = 0;
 
-    let flush_paragraph = |headings: &[String], lines: &mut Vec<String>, segments: &mut Vec<RawSegment>| {
-        if lines.is_empty() {
-            return;
-        }
-        let text = lines.join("\n");
-        lines.clear();
-        if text.trim().is_empty() {
-            return;
-        }
-        segments.push(RawSegment {
-            heading: heading_chain(headings),
-            text,
-            is_code: false,
-        });
-    };
+    let flush_paragraph =
+        |headings: &[String],
+         para_start: &mut Option<usize>,
+         para_end: usize,
+         segments: &mut Vec<RawSegment>,
+         md: &str| {
+            let Some(start) = *para_start else {
+                return;
+            };
+            *para_start = None;
+            let end = para_end;
+            if start >= end {
+                return;
+            }
+            let text = md[start..end].to_string();
+            if text.trim().is_empty() {
+                return;
+            }
+            segments.push(RawSegment {
+                heading: heading_chain(headings),
+                text,
+                is_code: false,
+                md_start: start,
+                md_end: end,
+            });
+        };
 
-    for line in md.lines() {
+    // Walk with a cursor so each segment records [md_start, md_end) over original bytes
+    // (line terminator included when present).
+    let mut offset = 0usize;
+    while offset < md.len() {
+        let rest = &md[offset..];
+        let line_len = rest.find('\n').map(|i| i + 1).unwrap_or(rest.len());
+        let line_raw = &md[offset..offset + line_len];
+        let line = line_raw.trim_end_matches(&['\n', '\r'][..]);
+        let line_start = offset;
+        let line_end = offset + line_len;
+        offset = line_end;
+
         if in_code {
+            code_end = line_end;
             if line.trim_start().starts_with("```") {
-                code_lines.push(line.to_string());
-                let text = code_lines.join("\n");
-                code_lines.clear();
                 in_code = false;
+                let text = md[code_start..code_end].to_string();
                 if !text.trim().is_empty() {
                     segments.push(RawSegment {
                         heading: heading_chain(&headings),
                         text,
                         is_code: true,
+                        md_start: code_start,
+                        md_end: code_end,
                     });
                 }
-            } else {
-                code_lines.push(line.to_string());
             }
             continue;
         }
 
         if line.trim_start().starts_with("```") {
-            flush_paragraph(&headings, &mut para_lines, &mut segments);
+            flush_paragraph(&headings, &mut para_start, para_end, &mut segments, md);
             in_code = true;
-            code_lines.push(line.to_string());
+            code_start = line_start;
+            code_end = line_end;
             continue;
         }
 
         if let Some((level, title)) = parse_heading(line) {
-            flush_paragraph(&headings, &mut para_lines, &mut segments);
+            flush_paragraph(&headings, &mut para_start, para_end, &mut segments, md);
             update_headings(&mut headings, level, title);
             continue;
         }
 
         if line.trim().is_empty() {
-            flush_paragraph(&headings, &mut para_lines, &mut segments);
+            flush_paragraph(&headings, &mut para_start, para_end, &mut segments, md);
         } else {
-            para_lines.push(line.to_string());
+            if para_start.is_none() {
+                para_start = Some(line_start);
+            }
+            para_end = line_end;
         }
     }
 
     if in_code {
-        let text = code_lines.join("\n");
+        let text = md[code_start..code_end].to_string();
         if !text.trim().is_empty() {
             segments.push(RawSegment {
                 heading: heading_chain(&headings),
                 text,
                 is_code: true,
+                md_start: code_start,
+                md_end: code_end,
             });
         }
     } else {
-        flush_paragraph(&headings, &mut para_lines, &mut segments);
+        flush_paragraph(&headings, &mut para_start, para_end, &mut segments, md);
     }
 
     segments
@@ -209,10 +343,11 @@ fn heading_chain(headings: &[String]) -> String {
     headings[start..].join(" / ")
 }
 
-fn split_long_text(text: &str, max_len: usize) -> Vec<String> {
+/// Returns `(piece, start_char, end_char)` with exclusive char end index into `text`.
+fn split_long_text_ranges(text: &str, max_len: usize) -> Vec<(String, usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max_len {
-        return vec![text.to_string()];
+        return vec![(text.to_string(), 0, chars.len())];
     }
 
     let mut out = Vec::new();
@@ -231,61 +366,166 @@ fn split_long_text(text: &str, max_len: usize) -> Vec<String> {
         if end <= start {
             end = (start + max_len).min(chars.len());
         }
-        out.push(chars[start..end].iter().collect());
+        out.push((chars[start..end].iter().collect(), start, end));
         start = end;
     }
     out
 }
 
+#[allow(dead_code)] // non-aligned entry; chunking uses strip_markdown_aligned
 fn strip_markdown(text: &str) -> String {
-    let mut out = String::new();
-    for line in text.lines() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&strip_markdown_line(line));
-    }
-    out
+    strip_markdown_aligned(text).0
 }
 
-fn strip_markdown_line(line: &str) -> String {
-    let mut s = line.trim().to_string();
-    if let Some(rest) = s.strip_prefix('>') {
-        s = rest.trim_start().to_string();
+/// Strip markdown markers; `origins[i]` = byte offset in `src` of the i-th char of `text`.
+fn strip_markdown_aligned(src: &str) -> (String, Vec<usize>) {
+    let mut out = String::new();
+    let mut origins = Vec::new();
+    let mut offset = 0usize;
+    let mut first = true;
+
+    while offset <= src.len() {
+        if offset == src.len() {
+            break;
+        }
+        let rest = &src[offset..];
+        let nl_at = rest.find('\n');
+        let line_end = nl_at.unwrap_or(rest.len());
+        let line_bytes = &src[offset..offset + line_end];
+        let line = line_bytes.trim_end_matches('\r');
+        let line_base = offset;
+        let next = if nl_at.is_some() {
+            offset + line_end + 1
+        } else {
+            src.len()
+        };
+
+        if !first {
+            let nl_pos = line_base + line.len();
+            // Prefer the actual `\n` byte; if `\r\n`, point at `\n`.
+            let nl_origin = if nl_pos < src.len() && src.as_bytes()[nl_pos] == b'\r' {
+                nl_pos + 1
+            } else {
+                nl_pos
+            };
+            out.push('\n');
+            origins.push(nl_origin.min(src.len().saturating_sub(1)));
+        }
+        first = false;
+
+        let (line_text, line_origins) = strip_markdown_line_aligned(line, line_base);
+        out.push_str(&line_text);
+        origins.extend(line_origins);
+
+        offset = next;
+        // Mirror `str::lines()`: a trailing newline does not yield an extra empty line.
+        if offset >= src.len() {
+            break;
+        }
     }
+
+    (out, origins)
+}
+
+fn strip_markdown_line_aligned(line: &str, base: usize) -> (String, Vec<usize>) {
+    let trim_start = line.len() - line.trim_start().len();
+    let trim_end = trim_start + line.trim().len();
+    if trim_start >= trim_end {
+        return ("".into(), vec![]);
+    }
+    let mut s = &line[trim_start..trim_end];
+    let mut s_base = base + trim_start;
+
+    if let Some(rest) = s.strip_prefix('>') {
+        let after = rest.trim_start();
+        let skip = s.len() - after.len();
+        s = after;
+        s_base += skip;
+    }
+
     if let Some(rest) = s.strip_prefix("- ") {
-        s = rest.to_string();
+        s = rest;
+        s_base += 2;
     } else if let Some(rest) = s.strip_prefix("* ") {
-        s = rest.to_string();
+        s = rest;
+        s_base += 2;
     } else if let Some(rest) = s.strip_prefix("+ ") {
-        s = rest.to_string();
+        s = rest;
+        s_base += 2;
     } else if let Some(pos) = s.find(". ") {
         if pos <= 3 && s[..pos].chars().all(|c| c.is_ascii_digit()) {
-            s = s[pos + 2..].to_string();
+            s = &s[pos + 2..];
+            s_base += pos + 2;
         }
     }
 
-    s = strip_inline_links(&s);
-    s = strip_emphasis(&s);
-    s = s.replace('`', "");
-    s.trim().to_string()
+    let (text, origins) = strip_inline_links_aligned(s, s_base);
+    let (text, origins) = strip_emphasis_aligned(&text, &origins);
+
+    // Remove backticks while keeping origins aligned.
+    let mut cleaned = String::new();
+    let mut cleaned_origins = Vec::new();
+    for (ch, &orig) in text.chars().zip(origins.iter()) {
+        if ch != '`' {
+            cleaned.push(ch);
+            cleaned_origins.push(orig);
+        }
+    }
+
+    // Final trim — drop leading/trailing whitespace chars from both.
+    let byte_start = cleaned.len() - cleaned.trim_start().len();
+    let byte_end = byte_start + cleaned.trim().len();
+    if byte_start >= byte_end {
+        return ("".into(), vec![]);
+    }
+    let mut cs = 0usize;
+    let mut bi = 0usize;
+    for ch in cleaned.chars() {
+        if bi >= byte_start {
+            break;
+        }
+        bi += ch.len_utf8();
+        cs += 1;
+    }
+    let mut ce = cs;
+    let mut bi2 = byte_start;
+    for ch in cleaned[byte_start..].chars() {
+        if bi2 >= byte_end {
+            break;
+        }
+        bi2 += ch.len_utf8();
+        ce += 1;
+    }
+    (
+        cleaned[byte_start..byte_end].to_string(),
+        cleaned_origins[cs..ce].to_vec(),
+    )
 }
 
-fn strip_inline_links(s: &str) -> String {
+fn strip_inline_links_aligned(s: &str, base: usize) -> (String, Vec<usize>) {
     let mut out = String::new();
+    let mut origins = Vec::new();
     let mut i = 0;
     while i < s.len() {
         let rest = &s[i..];
         if rest.starts_with("![") {
             if let Some((alt, next)) = parse_link_text(&s[i + 2..]) {
-                out.push_str(&alt);
+                let label_start = i + 2;
+                for (off, ch) in alt.char_indices() {
+                    out.push(ch);
+                    origins.push(base + label_start + off);
+                }
                 i += 2 + next;
                 continue;
             }
         }
         if rest.starts_with('[') {
             if let Some((label, next)) = parse_link_text(&s[i + 1..]) {
-                out.push_str(&label);
+                let label_start = i + 1;
+                for (off, ch) in label.char_indices() {
+                    out.push(ch);
+                    origins.push(base + label_start + off);
+                }
                 i += 1 + next;
                 continue;
             }
@@ -294,9 +534,10 @@ fn strip_inline_links(s: &str) -> String {
             break;
         };
         out.push(ch);
+        origins.push(base + i);
         i += ch.len_utf8();
     }
-    out
+    (out, origins)
 }
 
 fn parse_link_text(s: &str) -> Option<(String, usize)> {
@@ -321,21 +562,40 @@ fn parse_link_text(s: &str) -> Option<(String, usize)> {
     None
 }
 
-fn strip_emphasis(s: &str) -> String {
+/// Strip emphasis markers; `in_origins[i]` = src byte of i-th char of `s`.
+fn strip_emphasis_aligned(s: &str, in_origins: &[usize]) -> (String, Vec<usize>) {
+    debug_assert_eq!(s.chars().count(), in_origins.len());
+    // byte offset in `s` → char index (for mapping kept spans back to in_origins)
+    let mut byte_to_ci = vec![0usize; s.len() + 1];
+    for (ci, (bi, ch)) in s.char_indices().enumerate() {
+        for b in bi..bi + ch.len_utf8() {
+            byte_to_ci[b] = ci;
+        }
+        byte_to_ci[bi + ch.len_utf8()] = ci + 1;
+    }
+
+    let push_span = |out: &mut String, origins: &mut Vec<usize>, start: usize, end: usize| {
+        for (bi, ch) in s[start..end].char_indices() {
+            out.push(ch);
+            origins.push(in_origins[byte_to_ci[start + bi]]);
+        }
+    };
+
     let mut out = String::new();
-    let mut i = 0;
+    let mut origins = Vec::new();
+    let mut i = 0usize;
     while i < s.len() {
         let rest = &s[i..];
         if rest.starts_with("**") {
             if let Some(end) = s[i + 2..].find("**") {
-                out.push_str(&s[i + 2..i + 2 + end]);
+                push_span(&mut out, &mut origins, i + 2, i + 2 + end);
                 i += 4 + end;
                 continue;
             }
         }
         if rest.starts_with("~~") {
             if let Some(end) = s[i + 2..].find("~~") {
-                out.push_str(&s[i + 2..i + 2 + end]);
+                push_span(&mut out, &mut origins, i + 2, i + 2 + end);
                 i += 4 + end;
                 continue;
             }
@@ -346,15 +606,16 @@ fn strip_emphasis(s: &str) -> String {
         if ch == '*' || ch == '_' {
             let mark_len = ch.len_utf8();
             if let Some(end) = s[i + mark_len..].find(ch) {
-                out.push_str(&s[i + mark_len..i + mark_len + end]);
+                push_span(&mut out, &mut origins, i + mark_len, i + mark_len + end);
                 i += mark_len * 2 + end;
                 continue;
             }
         }
         out.push(ch);
+        origins.push(in_origins[byte_to_ci[i]]);
         i += ch.len_utf8();
     }
-    out
+    (out, origins)
 }
 
 pub fn embedding_to_blob(v: &[f32]) -> Vec<u8> {
@@ -992,6 +1253,35 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].content.trim(), "见图 电路图 说明");
         assert!(!chunks[0].content.contains("http://"));
+    }
+
+    #[test]
+    fn chunk_markdown_offsets_cover_raw_markdown() {
+        let md = "见 **输出比较** 与 [PWM 模式](http://example.com/pwm)\n";
+        let chunks = chunk_markdown(md);
+        assert_eq!(chunks.len(), 1);
+        let c = &chunks[0];
+        assert!(c.md_start >= 0 && c.md_end > c.md_start);
+        assert!((c.md_end as usize) <= md.len());
+        let slice = &md[c.md_start as usize..c.md_end as usize];
+        assert!(slice.contains("**输出比较**") || slice.contains("输出比较"));
+        assert!(slice.contains("PWM") || c.content.contains("PWM 模式"));
+        assert_eq!(c.content.trim(), "见 输出比较 与 PWM 模式");
+    }
+
+    #[test]
+    fn chunk_markdown_long_split_offsets_non_overlapping() {
+        let para: String = "字".repeat(1200);
+        let md = format!("# H\n\n{para}\n");
+        let chunks = chunk_markdown(&md);
+        assert!(chunks.len() >= 2);
+        let mut prev_end = -1i64;
+        for c in &chunks {
+            assert!(c.md_start >= 0 && c.md_end > c.md_start, "{c:?}");
+            assert!((c.md_end as usize) <= md.len());
+            assert!(c.md_start >= prev_end, "overlap/disorder: prev_end={prev_end} {:?}", c);
+            prev_end = c.md_end;
+        }
     }
 
     #[test]

@@ -530,6 +530,8 @@ fn migrate(conn: &Connection) -> Result<()> {
           model TEXT NOT NULL DEFAULT '',
           embedding BLOB,
           embed_error TEXT,
+          md_start INTEGER NOT NULL DEFAULT -1,
+          md_end INTEGER NOT NULL DEFAULT -1,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
         );
@@ -579,6 +581,27 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_kb_messages_session ON kb_messages(session_id, id);
         "#,
     )?;
+
+    // kb_chunks 原文偏移（引用来源跳转）；旧库缺列则补
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(kb_chunks)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(|c| c.ok())
+            .collect();
+        if !cols.iter().any(|c| c == "md_start") {
+            conn.execute(
+                "ALTER TABLE kb_chunks ADD COLUMN md_start INTEGER NOT NULL DEFAULT -1",
+                [],
+            )?;
+        }
+        if !cols.iter().any(|c| c == "md_end") {
+            conn.execute(
+                "ALTER TABLE kb_chunks ADD COLUMN md_end INTEGER NOT NULL DEFAULT -1",
+                [],
+            )?;
+        }
+    }
 
     Ok(())
 }
@@ -967,6 +990,15 @@ mod tests {
             .query_row("SELECT status FROM kb_meta WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(status, "idle");
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(kb_chunks)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|c| c.ok())
+            .collect();
+        assert!(cols.iter().any(|c| c == "md_start"), "kb_chunks 缺列 md_start");
+        assert!(cols.iter().any(|c| c == "md_end"), "kb_chunks 缺列 md_end");
     }
 
     #[test]
