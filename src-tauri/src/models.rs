@@ -501,6 +501,8 @@ pub struct KbSession {
     pub model_name: String,
     pub project_id: Option<i64>,
     pub pinned: bool,
+    pub sort_order: i64,
+    pub pin_sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
 }

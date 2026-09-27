@@ -932,6 +932,8 @@ export interface KbSession {
   model_name: string
   project_id: number | null
   pinned: boolean
+  sort_order: number
+  pin_sort_order: number
   created_at: string
   updated_at: string
 }

@@ -3,7 +3,7 @@ use crate::repo::now;
 use rusqlite::{params, Connection, Result};
 
 const SESSION_COLS: &str =
-    "id, title, model_name, project_id, pinned, created_at, updated_at";
+    "id, title, model_name, project_id, pinned, sort_order, pin_sort_order, created_at, updated_at";
 
 const MESSAGE_COLS: &str = "id, session_id, role, content, citations_json, created_at";
 
@@ -200,8 +200,10 @@ fn row_to_session(row: &rusqlite::Row) -> Result<KbSession> {
         model_name: row.get(2)?,
         project_id: row.get(3)?,
         pinned: row.get::<_, i64>(4)? != 0,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        sort_order: row.get(5)?,
+        pin_sort_order: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 

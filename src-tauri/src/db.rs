@@ -562,6 +562,8 @@ fn migrate(conn: &Connection) -> Result<()> {
           model_name TEXT NOT NULL DEFAULT '',
           project_id INTEGER REFERENCES kb_projects(id) ON DELETE SET NULL,
           pinned INTEGER NOT NULL DEFAULT 0,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          pin_sort_order INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
         );
@@ -580,6 +582,91 @@ fn migrate(conn: &Connection) -> Result<()> {
         "#,
     )?;
 
+    let kb_sess_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(kb_sessions)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let added_sort_order = !kb_sess_cols.iter().any(|c| c == "sort_order");
+    if added_sort_order {
+        conn.execute(
+            "ALTER TABLE kb_sessions ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    let added_pin_sort_order = !kb_sess_cols.iter().any(|c| c == "pin_sort_order");
+    if added_pin_sort_order {
+        conn.execute(
+            "ALTER TABLE kb_sessions ADD COLUMN pin_sort_order INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if added_sort_order {
+        backfill_kb_session_sort_orders(conn)?;
+    } else if added_pin_sort_order {
+        backfill_kb_session_pin_sort_orders(conn)?;
+    }
+
+    Ok(())
+}
+
+/// 存量 kb 会话按 project_id 分组回填 sort_order（updated_at DESC, id DESC → 1..n）。
+fn backfill_kb_session_membership_sort_orders(conn: &Connection) -> Result<()> {
+    let project_keys: Vec<i64> = conn
+        .prepare("SELECT DISTINCT IFNULL(project_id, -1) FROM kb_sessions")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for key in project_keys {
+        let ids: Vec<i64> = if key == -1 {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM kb_sessions WHERE project_id IS NULL ORDER BY updated_at DESC, id DESC",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM kb_sessions WHERE project_id = ?1 ORDER BY updated_at DESC, id DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![key], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        for (i, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE kb_sessions SET sort_order = ?1 WHERE id = ?2",
+                rusqlite::params![(i as i64) + 1, id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// 置顶会话回填 pin_sort_order；未置顶归零。
+fn backfill_kb_session_pin_sort_orders(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE kb_sessions SET pin_sort_order = 0 WHERE pinned = 0",
+        [],
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id FROM kb_sessions WHERE pinned = 1 ORDER BY updated_at DESC, id DESC",
+    )?;
+    let ids: Vec<i64> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE kb_sessions SET pin_sort_order = ?1 WHERE id = ?2",
+            rusqlite::params![(i as i64) + 1, id],
+        )?;
+    }
+    Ok(())
+}
+
+fn backfill_kb_session_sort_orders(conn: &Connection) -> Result<()> {
+    backfill_kb_session_membership_sort_orders(conn)?;
+    backfill_kb_session_pin_sort_orders(conn)?;
     Ok(())
 }
 
@@ -980,5 +1067,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn kb_sessions_have_sort_columns_after_migrate() {
+        let conn = init_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(kb_sessions)")
+            .unwrap()
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(cols.iter().any(|c| c == "sort_order"));
+        assert!(cols.iter().any(|c| c == "pin_sort_order"));
     }
 }
