@@ -11,9 +11,7 @@ pub struct ChunkText {
     pub heading: String,
     pub content: String,
     /// UTF-8 byte offset into source md; -1 = unknown
-    #[allow(dead_code)] // read by later citation/persist tasks + unit tests
     pub md_start: i64,
-    #[allow(dead_code)]
     pub md_end: i64,
 }
 
@@ -817,16 +815,28 @@ struct ChunkRow {
     heading: String,
     content: String,
     embedding: Option<Vec<u8>>,
+    md_start: i64,
+    md_end: i64,
+}
+
+fn opt_offset(v: i64) -> Option<i64> {
+    if v >= 0 {
+        Some(v)
+    } else {
+        None
+    }
 }
 
 fn load_chunks_with_notes(conn: &Connection, only_embedded: bool) -> rusqlite::Result<Vec<ChunkRow>> {
     let sql = if only_embedded {
-        "SELECT c.id, c.note_id, n.title, n.folder_id, c.heading, c.content, c.embedding
+        "SELECT c.id, c.note_id, n.title, n.folder_id, c.heading, c.content, c.embedding,
+                c.md_start, c.md_end
          FROM kb_chunks c
          JOIN notes n ON n.id = c.note_id
          WHERE c.embedding IS NOT NULL"
     } else {
-        "SELECT c.id, c.note_id, n.title, n.folder_id, c.heading, c.content, c.embedding
+        "SELECT c.id, c.note_id, n.title, n.folder_id, c.heading, c.content, c.embedding,
+                c.md_start, c.md_end
          FROM kb_chunks c
          JOIN notes n ON n.id = c.note_id"
     };
@@ -840,6 +850,8 @@ fn load_chunks_with_notes(conn: &Connection, only_embedded: bool) -> rusqlite::R
             heading: r.get(4)?,
             content: r.get(5)?,
             embedding: r.get(6)?,
+            md_start: r.get(7)?,
+            md_end: r.get(8)?,
         })
     })?;
     rows.collect()
@@ -875,6 +887,8 @@ fn to_hit(
         score,
         vector_score,
         keyword_hits,
+        md_start: opt_offset(row.md_start),
+        md_end: opt_offset(row.md_end),
     }
 }
 
@@ -991,13 +1005,15 @@ pub fn insert_chunk(
     model: &str,
     embedding: Option<&[u8]>,
     embed_error: Option<&str>,
+    md_start: i64,
+    md_end: i64,
 ) -> rusqlite::Result<()> {
     let token_count = content.chars().count() as i64;
     conn.execute(
         "INSERT INTO kb_chunks (
             note_id, chunk_index, heading, content, token_count,
-            dim, model, embedding, embed_error
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            dim, model, embedding, embed_error, md_start, md_end
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             note_id,
             idx,
@@ -1007,7 +1023,9 @@ pub fn insert_chunk(
             dim,
             model,
             embedding,
-            embed_error
+            embed_error,
+            md_start,
+            md_end
         ],
     )?;
     Ok(())
@@ -1025,11 +1043,13 @@ pub fn replace_note_chunks(
         &str,         // model
         Option<&[u8]>, // embedding
         Option<&str>, // embed_error
+        i64,          // md_start
+        i64,          // md_end
     )],
 ) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     delete_chunks_for_note(&tx, note_id)?;
-    for (idx, heading, content, dim, model, embedding, embed_error) in rows {
+    for (idx, heading, content, dim, model, embedding, embed_error, md_start, md_end) in rows {
         insert_chunk(
             &tx,
             note_id,
@@ -1040,6 +1060,8 @@ pub fn replace_note_chunks(
             model,
             *embedding,
             *embed_error,
+            *md_start,
+            *md_end,
         )?;
     }
     tx.commit()?;
@@ -1332,6 +1354,8 @@ mod tests {
             "m",
             None,
             Some("no embed"),
+            0,
+            4,
         )
         .unwrap();
         assert_eq!(count_chunks(&conn).unwrap(), 1);
@@ -1339,18 +1363,20 @@ mod tests {
         replace_note_chunks(
             &conn,
             n.id,
-            &[(1, "H2", "body2", 0, "m", None, Some("still no"))],
+            &[(1, "H2", "body2", 0, "m", None, Some("still no"), 10, 15)],
         )
         .unwrap();
         assert_eq!(count_chunks(&conn).unwrap(), 1);
-        let idx: i64 = conn
+        let (idx, md_start, md_end): (i64, i64, i64) = conn
             .query_row(
-                "SELECT chunk_index FROM kb_chunks WHERE note_id = ?1",
+                "SELECT chunk_index, md_start, md_end FROM kb_chunks WHERE note_id = ?1",
                 params![n.id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
         assert_eq!(idx, 1);
+        assert_eq!(md_start, 10);
+        assert_eq!(md_end, 15);
     }
 
     #[test]
@@ -1372,7 +1398,7 @@ mod tests {
     fn finalize_rebuild_all_embed_failed_sets_error() {
         let conn = crate::db::init_in_memory().unwrap();
         let n = crate::repo::note::create(&conn, "t").unwrap();
-        insert_chunk(&conn, n.id, 0, "", "body", 0, "m", None, Some("boom")).unwrap();
+        insert_chunk(&conn, n.id, 0, "", "body", 0, "m", None, Some("boom"), -1, -1).unwrap();
         let err = finalize_rebuild_meta(&conn, "m").unwrap_err();
         assert!(err.contains("嵌入全部失败"));
         let (status, _, _, _, _, _, e) = get_meta(&conn).unwrap();
@@ -1397,7 +1423,7 @@ mod tests {
         let conn = crate::db::init_in_memory().unwrap();
         let n = crate::repo::note::create(&conn, "t").unwrap();
         let blob = embedding_to_blob(&[1.0f32, 0.0]);
-        insert_chunk(&conn, n.id, 0, "", "body", 2, "m", Some(&blob), None).unwrap();
+        insert_chunk(&conn, n.id, 0, "", "body", 2, "m", Some(&blob), None, -1, -1).unwrap();
         set_meta_done(&conn, "m", 1, 1).unwrap();
 
         crate::repo::note::delete(&conn, n.id).unwrap();
@@ -1449,6 +1475,8 @@ mod tests {
             "m",
             None,
             Some("no embed"),
+            5,
+            20,
         )
         .unwrap();
         let hits = hybrid_search(&conn, &[], "架构设计", 3).unwrap();
@@ -1456,6 +1484,8 @@ mod tests {
         assert_eq!(hits[0].note_id, n.id);
         assert!(hits[0].keyword_hits > 0);
         assert_eq!(hits[0].folder_path, "未分类");
+        assert_eq!(hits[0].md_start, Some(5));
+        assert_eq!(hits[0].md_end, Some(20));
     }
 
     #[test]
@@ -1465,8 +1495,8 @@ mod tests {
         let n2 = crate::repo::note::create(&conn, "无关").unwrap();
         let close = embedding_to_blob(&[1.0f32, 0.0, 0.0]);
         let far = embedding_to_blob(&[0.0f32, 1.0, 0.0]);
-        insert_chunk(&conn, n1.id, 0, "", "close", 3, "m", Some(&close), None).unwrap();
-        insert_chunk(&conn, n2.id, 0, "", "far", 3, "m", Some(&far), None).unwrap();
+        insert_chunk(&conn, n1.id, 0, "", "close", 3, "m", Some(&close), None, -1, -1).unwrap();
+        insert_chunk(&conn, n2.id, 0, "", "far", 3, "m", Some(&far), None, -1, -1).unwrap();
         let hits = hybrid_search(&conn, &[1.0, 0.0, 0.0], "xyz", 3).unwrap();
         assert!(hits.len() >= 2);
         assert_eq!(hits[0].note_id, n1.id);
@@ -1488,6 +1518,8 @@ mod tests {
                 "m",
                 None,
                 Some("e"),
+                -1,
+                -1,
             )
             .unwrap();
         }
@@ -1518,6 +1550,8 @@ mod tests {
                 "m",
                 Some(&v),
                 None,
+                -1,
+                -1,
             )
             .unwrap();
         }
@@ -1534,6 +1568,8 @@ mod tests {
             "m",
             Some(&far),
             None,
+            -1,
+            -1,
         )
         .unwrap();
 

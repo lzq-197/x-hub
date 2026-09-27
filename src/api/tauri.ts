@@ -866,6 +866,8 @@ export interface Citation {
   folder_path: string
   heading: string
   snippet: string
+  md_start?: number | null
+  md_end?: number | null
 }
 
 /** 知识库索引 / 嵌入状态（kb_get_status / kb_ask 附带） */
@@ -891,6 +893,8 @@ export interface KbChunkHit {
   score: number
   vector_score: number
   keyword_hits: number
+  md_start?: number | null
+  md_end?: number | null
 }
 
 /** 与 Rust `KbAskEvent` 对齐：`#[serde(tag = "type", rename_all = "camelCase")]` */

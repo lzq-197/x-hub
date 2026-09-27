@@ -129,7 +129,17 @@ async fn index_note_inner(app: &AppHandle, note_id: i64, force: bool) -> Result<
             let blobs: Vec<Option<Vec<u8>>> = (0..chunks.len())
                 .map(|i| vecs.get(i).map(|v| kb_repo::embedding_to_blob(v)))
                 .collect();
-            let row_refs: Vec<(i64, &str, &str, i64, &str, Option<&[u8]>, Option<&str>)> = chunks
+            let row_refs: Vec<(
+                i64,
+                &str,
+                &str,
+                i64,
+                &str,
+                Option<&[u8]>,
+                Option<&str>,
+                i64,
+                i64,
+            )> = chunks
                 .iter()
                 .enumerate()
                 .map(|(i, c)| {
@@ -143,6 +153,8 @@ async fn index_note_inner(app: &AppHandle, note_id: i64, force: bool) -> Result<
                         cfg.model.as_str(),
                         emb,
                         None,
+                        c.md_start,
+                        c.md_end,
                     )
                 })
                 .collect();
@@ -151,7 +163,17 @@ async fn index_note_inner(app: &AppHandle, note_id: i64, force: bool) -> Result<
         Err(e) => {
             log::warn!("kb embed note {note_id}: {e}");
             let err_msg = e.as_str();
-            let row_refs: Vec<(i64, &str, &str, i64, &str, Option<&[u8]>, Option<&str>)> = chunks
+            let row_refs: Vec<(
+                i64,
+                &str,
+                &str,
+                i64,
+                &str,
+                Option<&[u8]>,
+                Option<&str>,
+                i64,
+                i64,
+            )> = chunks
                 .iter()
                 .enumerate()
                 .map(|(i, c)| {
@@ -163,6 +185,8 @@ async fn index_note_inner(app: &AppHandle, note_id: i64, force: bool) -> Result<
                         cfg.model.as_str(),
                         None,
                         Some(err_msg),
+                        c.md_start,
+                        c.md_end,
                     )
                 })
                 .collect();
@@ -697,6 +721,8 @@ fn hits_to_citations(hits: &[KbChunkHit]) -> Vec<Citation> {
             folder_path: h.folder_path.clone(),
             heading: h.heading.clone(),
             snippet: snippet_of(&h.content),
+            md_start: h.md_start,
+            md_end: h.md_end,
         })
         .collect()
 }

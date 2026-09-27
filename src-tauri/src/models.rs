@@ -473,6 +473,10 @@ pub struct KbChunkHit {
     pub score: f64,
     pub vector_score: f64,
     pub keyword_hits: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md_end: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -483,6 +487,10 @@ pub struct Citation {
     pub folder_path: String,
     pub heading: String,
     pub snippet: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md_end: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
