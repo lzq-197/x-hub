@@ -68,6 +68,8 @@ let remountQueued = false
 let detachBlockDrag: (() => void) | null = null
 let revealCollapseTimer: ReturnType<typeof setTimeout> | null = null
 let revealGen = 0
+/** 引用定位临时切到 wysiwyg 前的模式；高亮结束或失败后恢复（不落盘） */
+let modeBeforeReveal: NoteEditorMode | null = null
 
 const localTitle = ref('')
 const localContent = ref('')
@@ -334,13 +336,21 @@ watch(
   },
 )
 
+function restoreModeAfterReveal() {
+  if (!modeBeforeReveal) return
+  const restore = modeBeforeReveal
+  modeBeforeReveal = null
+  void nextTick(() => void applyMode(restore, false))
+}
+
 /** 知识库引用：Crepe 就绪后按 UTF-8 字节偏移定位选区；偏移无效只打开；偏移有效但搜不到才回退标题 */
 async function applyReveal() {
   const r = props.reveal
   const note = props.note
   if (!r || !note) return
-  // 源码/分屏先切到所见即所得再定位（不持久化模式，避免改用户偏好）
+  // 源码/分屏先切到所见即所得再定位（不持久化）；结束后恢复
   if (mode.value !== 'wysiwyg') {
+    if (!modeBeforeReveal) modeBeforeReveal = mode.value
     void applyMode('wysiwyg', false)
     return
   }
@@ -354,6 +364,7 @@ async function applyReveal() {
 
   const md = localContent.value || note.content || ''
   const byteLen = utf8ByteLength(md)
+  let scheduledHighlight = false
   try {
     await crepe.editor.action((ctx) => {
       if (gen !== revealGen) return
@@ -362,9 +373,10 @@ async function applyReveal() {
       if (offsetsValid(r.mdStart, r.mdEnd, byteLen)) {
         const raw = utf8ByteSlice(md, r.mdStart, r.mdEnd)
         const needle = plainForMatch(raw)
-        range = needle ? findTextRangeInDoc(view.state.doc, needle) : null
+        const preferNear = r.heading ? findHeadingPosInDoc(view.state.doc, r.heading) : null
+        range = needle ? findTextRangeInDoc(view.state.doc, needle, preferNear) : null
         if (!range) {
-          const hPos = r.heading ? findHeadingPosInDoc(view.state.doc, r.heading) : null
+          const hPos = preferNear ?? (r.heading ? findHeadingPosInDoc(view.state.doc, r.heading) : null)
           if (hPos != null) {
             const sel = TextSelection.findFrom(view.state.doc.resolve(hPos), 1, true)
             if (sel) view.dispatch(view.state.tr.setSelection(sel).scrollIntoView())
@@ -378,9 +390,13 @@ async function applyReveal() {
         view.dispatch(tr)
         const from = range.from
         const noteId = note.id
+        scheduledHighlight = true
         revealCollapseTimer = setTimeout(() => {
           revealCollapseTimer = null
-          if (gen !== revealGen || !crepe || props.note?.id !== noteId) return
+          if (gen !== revealGen || !crepe || props.note?.id !== noteId) {
+            restoreModeAfterReveal()
+            return
+          }
           crepe.editor.action((actx) => {
             const v = actx.get(editorViewCtx)
             const size = v.state.doc.content.size
@@ -388,6 +404,7 @@ async function applyReveal() {
             const sel = TextSelection.create(v.state.doc, pos)
             v.dispatch(v.state.tr.setSelection(sel))
           })
+          restoreModeAfterReveal()
         }, 2000)
         return
       }
@@ -395,7 +412,16 @@ async function applyReveal() {
   } catch (e) {
     console.warn('引用定位失败', e)
   } finally {
-    if (gen === revealGen) emit('reveal-done')
+    if (gen === revealGen) {
+      emit('reveal-done')
+      // 无选区高亮时：若曾临时切到 wysiwyg，稍留视口再恢复（标题回退 / 仅打开）
+      if (!scheduledHighlight && modeBeforeReveal) {
+        revealCollapseTimer = setTimeout(() => {
+          revealCollapseTimer = null
+          if (gen === revealGen) restoreModeAfterReveal()
+        }, 1200)
+      }
+    }
   }
 }
 
@@ -405,6 +431,22 @@ watch(
     void nextTick(() => void applyReveal())
   },
   { flush: 'post' },
+)
+
+/** 切走笔记时取消未完成的 reveal，避免 pendingReveal 残留后再次激活 */
+watch(
+  () => props.note?.id,
+  (id, prev) => {
+    if (prev != null && id !== prev && props.reveal) {
+      revealGen++
+      if (revealCollapseTimer) {
+        clearTimeout(revealCollapseTimer)
+        revealCollapseTimer = null
+      }
+      modeBeforeReveal = null
+      emit('reveal-done')
+    }
+  },
 )
 
 function syncLocal() {

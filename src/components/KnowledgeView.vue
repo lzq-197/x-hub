@@ -265,13 +265,6 @@ function onAnswerClick(e: MouseEvent) {
   const msg = messages.value.find((m) => String(m.id) === msgId)
   const cite = msg?.citations.find((c) => c.index === n)
   if (cite) openCitation(cite)
-  const el = (root ?? document).querySelector(`[data-cite-index="${n}"]`) as HTMLElement | null
-  el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-  flashCite.value = snipKey(msgId, n)
-  if (flashTimer) clearTimeout(flashTimer)
-  flashTimer = setTimeout(() => {
-    flashCite.value = null
-  }, 1200)
 }
 
 function decorateContent(

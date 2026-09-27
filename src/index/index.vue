@@ -21,6 +21,7 @@ import { isTauri, tauriApi } from '../api/tauri'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import type { Countdown, ExtensionEntry, Note, Resource, Todo } from '../api/tauri'
 import { playChime } from '../utils/chime'
+import { offsetsValid, utf8ByteLength } from '../utils/utf8Slice'
 import { BrainCircuit, FileText, FolderOpen, LayoutDashboard, ListTodo, MessageSquare, Puzzle, Settings, ChevronLeft, ChevronRight, AppWindow, PanelRight } from 'lucide-vue-next'
 import type { Component } from 'vue'
 import { useTheme } from '../composables/useTheme'
@@ -528,6 +529,9 @@ async function onCreateNote(folderId: number | null = null) {
 }
 
 function onSelectNote(id: number) {
+  if (pendingReveal.value && pendingReveal.value.noteId !== id) {
+    pendingReveal.value = null
+  }
   activeNoteId.value = id
 }
 
@@ -552,6 +556,7 @@ async function onDeleteNote(id: number) {
   }
   await store.removeNote(id)
   if (activeNoteId.value === id) activeNoteId.value = null
+  if (pendingReveal.value?.noteId === id) pendingReveal.value = null
   showToast('笔记已删除', {
     label: '撤销',
     onClick: async () => {
@@ -711,17 +716,25 @@ function onOpenNoteById(
   const noteId = typeof payload === 'number' ? payload : payload.noteId
   activeNoteId.value = noteId
   activeView.value = 'notes'
-  if (
-    typeof payload !== 'number' &&
-    typeof payload.mdStart === 'number' &&
-    typeof payload.mdEnd === 'number' &&
-    payload.mdStart >= 0 &&
-    payload.mdEnd > payload.mdStart
-  ) {
+  if (typeof payload === 'number') {
+    pendingReveal.value = null
+    return
+  }
+  const mdStart = payload.mdStart
+  const mdEnd = payload.mdEnd
+  const note = store.state.notes.find((n) => n.id === noteId)
+  const byteLen = note ? utf8ByteLength(note.content ?? '') : null
+  const offsetsOk =
+    typeof mdStart === 'number' &&
+    typeof mdEnd === 'number' &&
+    mdStart >= 0 &&
+    mdEnd > mdStart &&
+    (byteLen == null || offsetsValid(mdStart, mdEnd, byteLen))
+  if (offsetsOk) {
     pendingReveal.value = {
       noteId,
-      mdStart: payload.mdStart,
-      mdEnd: payload.mdEnd,
+      mdStart: mdStart!,
+      mdEnd: mdEnd!,
       heading: payload.heading,
     }
   } else {
