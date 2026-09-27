@@ -547,6 +547,36 @@ fn migrate(conn: &Connection) -> Result<()> {
           progress INTEGER NOT NULL DEFAULT 0
         );
         INSERT OR IGNORE INTO kb_meta (id) VALUES (1);
+
+        CREATE TABLE IF NOT EXISTS kb_projects (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          sort_order INTEGER,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS kb_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL DEFAULT '新对话',
+          model_name TEXT NOT NULL DEFAULT '',
+          project_id INTEGER REFERENCES kb_projects(id) ON DELETE SET NULL,
+          pinned INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS kb_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES kb_sessions(id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+          content TEXT NOT NULL DEFAULT '',
+          citations_json TEXT,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_kb_sessions_updated ON kb_sessions(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_kb_messages_session ON kb_messages(session_id, id);
         "#,
     )?;
 
@@ -937,5 +967,18 @@ mod tests {
             .query_row("SELECT status FROM kb_meta WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(status, "idle");
+    }
+
+    #[test]
+    fn kb_chat_tables_exist_after_migrate() {
+        let conn = init_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('kb_projects','kb_sessions','kb_messages')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 3);
     }
 }

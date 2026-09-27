@@ -486,6 +486,37 @@ pub struct Citation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbProject {
+    pub id: i64,
+    pub name: String,
+    pub sort_order: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbSession {
+    pub id: i64,
+    pub title: String,
+    pub model_name: String,
+    pub project_id: Option<i64>,
+    pub pinned: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbMessage {
+    pub id: i64,
+    pub session_id: i64,
+    pub role: String,
+    pub content: String,
+    /// Assistant: JSON array of Citation; user: null
+    pub citations_json: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KbStatus {
     pub status: String,
     pub indexed_notes: i64,
