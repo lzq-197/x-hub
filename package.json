@@ -6,7 +6,8 @@
   "scripts": {
     "test:security": "node --test tests/security.test.mjs",
     "test:kb-decorate": "node --test tests/kb-ask-decorate.test.mjs",
-    "test:unit": "node --test tests/security.test.mjs tests/kb-ask-decorate.test.mjs",
+    "test:utf8-slice": "node --test tests/utf8-slice.test.mjs",
+    "test:unit": "node --test tests/security.test.mjs tests/kb-ask-decorate.test.mjs tests/utf8-slice.test.mjs",
     "dev": "vite",
     "prebuild": "node scripts/gen-settings-index.mjs && node scripts/check-settings-css.mjs",
     "check:settings-css": "node scripts/check-settings-css.mjs",
